@@ -26,7 +26,7 @@ NP_conc=Npdosing*Vdosing*fTzone/VTzone # Number of particles per mL in Tzone of 
 
 R_NP = 35 * nm # Nanoparticle radius in units of length
 N_ligands = 150 # Number of ligands on the nanoparticle
-sigma_L = 150.0 / ( 4.0 * np.pi * R_NP**2 ) # surface density of ligands
+sigma_L = N_ligands / ( 4.0 * np.pi * R_NP**2 ) # surface density of ligands
 sigma_P2K = sigma_L * 11.4 
 
 # We assume the presence of short (inert) PEG chains + additional ligands on the nanoparticles
