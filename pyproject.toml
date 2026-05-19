@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanoadsorption"
+version = "0.1.0"
+description = "Mean-field model of multivalent nanoparticle adsorption to cell surfaces"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "mpmath",
+    "matplotlib",
+    "typer",
+]
+
+[project.scripts]
+nanoads = "cli:app"
+
+[tool.setuptools]
+py-modules = [
+    "cli",
+    "adsorption",
+    "units",
+    "scan_both_polymer_models",
+    "scan_Npdosing",
+    "scan_Npdosing_langmuir",
+    "scan_multi_Npdosing",
+    "system_variables_invivo",
+    "system_variables_invivo_multi",
+    "system_variables_invitro",
+]

@@ -464,6 +464,3 @@ def scan_both_polymer_models_cmd(
         )
 
     print("\nDone.")
-
-
-app()
