@@ -13,6 +13,7 @@ dependencies = [
     "mpmath",
     "matplotlib",
     "typer",
+    "pyyaml",
 ]
 
 [project.scripts]
@@ -21,6 +22,7 @@ nanoads = "cli:app"
 [tool.setuptools]
 py-modules = [
     "cli",
+    "test_cli",
     "adsorption",
     "units",
     "scan_both_polymer_models",
