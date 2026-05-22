@@ -100,19 +100,25 @@ binder_linear_size_nm: 3.5  # Linear size of the binding domain [nm] (e.g., Fab 
 nonspec_interaction_kT: 0.0 # Nonspecific NP–cell interaction energy [kT]; 0 = none
 
 # ── In-vivo biological target (scan-npdosing, scan-multi-npdosing) ─────────────
-# Default values correspond to T cells in the mouse spleen.
+# Concentrations are derived from primary biological/dosing parameters:
+#   cell_conc = N_lympho × T_cell_fraction / V_spleen
+#   NP_conc   = Npdosing_per_mL × Vdosing_mL × fTzone / VTzone_mL
+# To override the derived values directly, add NP_conc_per_mL and/or
+# cell_conc_per_mL — these take precedence when present.
+N_lympho: 7.5e7                # Lymphocytes in mouse spleen
+T_cell_fraction: 0.25          # Fraction of lymphocytes that are T cells
+V_spleen_mm3: 100.0            # Spleen volume [mm³]
 A_cell_um2: 100.0              # Target cell surface area [µm²]
-cell_conc_per_mL: 1.875e+8    # Target cell concentration in tissue [cells/mL]
-                              # Default: N_T_cells / V_spleen = 1.875e7 / 0.1 mL
-NP_conc_per_mL: 1.905e+12     # NP concentration in the target tissue region [NP/mL]
-                              # Default: 8e12/mL x 0.1 mL x 0.1 / 0.042 mL ~ 1.905e12/mL
-VTzone_mL: 0.042              # Volume of target tissue region [mL] (e.g., spleen T-zone)
+Npdosing_per_mL: 8.0e12        # NP concentration in dosing solution [NP/mL]
+Vdosing_mL: 0.1                # Dosing volume per animal [mL]  (5 mL/kg × 0.02 kg)
+fTzone: 0.1                    # Fraction of dosed particles that reach the T zone
+VTzone_mL: 0.042               # Volume of spleen T zone [mL]
 
 # ── In-vitro / SPR target (scan-npdosing-langmuir) ────────────────────────────
-A_SPR_mm2: 1.0                # SPR chip area [mm²]
-V_SPR_mL: 6.0e-5              # Volume of solution above the SPR chip [mL]
-NP_conc_SPR_per_mL: 4.0e+11   # NP concentration in SPR solution [NP/mL]
-# cell_conc for SPR is computed automatically as 1 / V_SPR (single-chip geometry)
+# NP_conc = Npdosing_SPR_per_mL;  cell_conc = 1/V_SPR  (single-chip geometry)
+A_SPR_mm2: 1.0                 # SPR chip area [mm²]
+V_SPR_mL: 6.0e-5               # Volume of solution above the SPR chip [mL]
+Npdosing_SPR_per_mL: 4.0e11    # NP concentration in SPR solution [NP/mL]
 
 # ── Receptor definitions ───────────────────────────────────────────────────────
 # List one entry per distinct receptor type.
@@ -167,10 +173,11 @@ ligands:
 #     KD_nM: 500.0
 
 
-# ── Codependent receptor densities (scan-both-polymer-models only) ─────────────
+# ── Codependent receptor densities ────────────────────────────────────────────
 # Tie one or more secondary receptor densities to a primary receptor's sweep axis.
 # sigma_secondary = ratio × sigma_primary at every grid point.
-# Both primary and secondary must be listed in the 'receptors' section above.
+# For scan-both-polymer-models: secondary/primary must match the 'receptors' list above.
+# For scan-combinations: secondary/primary must match receptor names in the CSV.
 # At most 2 *primary* (independent-axis) receptors are allowed.
 # Omit this key or leave it empty to sweep all listed receptors independently.
 # codependent_receptors:
@@ -185,7 +192,6 @@ sigma_R_max_per_um2: 2000.0    # upper bound of σ_R sweep [µm⁻²]
 n_pts_1D: 50                   # grid points for 1D sweep
 n_pts_2D: 20                   # grid points per axis for 2D sweep (total = n_pts_2D²)
 
-compare_polymer_models: true
 polymer_models:                # valid names: gaussian, Flory-exact, Flory-approx
   - gaussian
   - Flory-exact
@@ -231,16 +237,20 @@ def _load_system_vars_yaml(path: Path) -> dict:
     sigma_P2K = sigma_L * ratio
 
     # Binding thermodynamics
-    KD_nM_global = _req("KD_nM")
+    # KD_nM_global is optional: only required when a binding ligand in 'ligands:' has no
+    # per-ligand KD_nM.  scan-combinations reads KDs from the CSV, so it can omit this key.
+    KD_nM_global = cfg.get("KD_nM", None)
     binder_size  = _req("binder_linear_size_nm") * nm
     nonspec      = _req("nonspec_interaction_kT") * kT
 
-    # Receptor dicts — one Python object per unique receptor name (shared-reference semantics)
-    rec_list  = _req("receptors")
+    # Receptor dicts — one Python object per unique receptor name (shared-reference semantics).
+    # 'receptors' is optional; scan-combinations reads receptors from the CSV instead.
+    rec_list: list = cfg.get("receptors", []) or []
     _rec_dicts: dict = {rec["name"]: {"name": rec["name"]} for rec in rec_list}
 
-    # Build data_polymers
-    lig_list: list = _req("ligands")
+    # Build data_polymers from the 'ligands' section.
+    # 'ligands' is optional; scan-combinations builds data_polymers per run from the CSV.
+    lig_list: list = cfg.get("ligands", []) or []
     data_polymers: dict = {}
     for lig in lig_list:
         lname = lig["name"]
@@ -260,6 +270,11 @@ def _load_system_vars_yaml(path: Path) -> dict:
                     f"not found in 'receptors' list"
                 )
             KD_lig = lig.get("KD_nM", KD_nM_global)
+            if KD_lig is None:
+                raise ValueError(
+                    f"Binding ligand '{lname}' has no KD_nM and no global KD_nM is set. "
+                    "Add KD_nM globally or per ligand."
+                )
             data_polymers[lname] = {
                 "N": NmonoL, "a": amono, "sigma": sigma_L,
                 "name": lname, "akuhn": akuhn,
@@ -268,36 +283,59 @@ def _load_system_vars_yaml(path: Path) -> dict:
                 "binder_linear_size": binder_size,
             }
 
-    first_rec = _rec_dicts[rec_list[0]["name"]]
+    first_rec = _rec_dicts[rec_list[0]["name"]] if rec_list else None
 
-    # In-vivo context (scan-npdosing, scan-multi-npdosing)
-    # float() handles the case where the user wrote bare scientific notation (e.g. 1.875e8)
-    # which PyYAML parses as a string rather than a float.
-    A_cell    = float(cfg.get("A_cell_um2",        100.0   )) * um2
-    cell_conc = float(cfg.get("cell_conc_per_mL",  1.875e8 )) / mL
-    NP_conc   = float(cfg.get("NP_conc_per_mL",   1.905e12 )) / mL
-    VTzone    = float(cfg.get("VTzone_mL",          0.042   )) * mL
+    # ── In-vivo context (scan-npdosing, scan-multi-npdosing) ─────────────────
+    # cell_conc = N_lympho × T_cell_fraction / V_spleen
+    # NP_conc   = Npdosing × Vdosing × fTzone / VTzone
+    # If the direct-override keys NP_conc_per_mL / cell_conc_per_mL are present
+    # they take precedence over the derived values.
+    _N_lympho       = float(cfg.get("N_lympho",        7.5e7))
+    _T_cell_frac    = float(cfg.get("T_cell_fraction", 0.25))
+    _V_spleen       = float(cfg.get("V_spleen_mm3",    100.0)) * mm3
+    _cell_conc_bio  = _N_lympho * _T_cell_frac / _V_spleen
+    A_cell          = float(cfg.get("A_cell_um2",      100.0)) * um2
+    cell_conc = (float(cfg["cell_conc_per_mL"]) / mL
+                 if "cell_conc_per_mL" in cfg else _cell_conc_bio)
 
-    # In-vitro / SPR context (scan-npdosing-langmuir)
-    A_SPR         = float(cfg.get("A_SPR_mm2",          1.0    )) * mm2
-    V_SPR         = float(cfg.get("V_SPR_mL",           6.0e-5 )) * mL
-    NP_conc_spr   = float(cfg.get("NP_conc_SPR_per_mL", 4.0e11 )) / mL
+    _Npdosing       = float(cfg.get("Npdosing_per_mL", 8e12))  / mL   # [nm⁻³]
+    _Vdosing        = float(cfg.get("Vdosing_mL",      0.1))   * mL   # [nm³]
+    _fTzone         = float(cfg.get("fTzone",           0.1))
+    VTzone          = float(cfg.get("VTzone_mL",        0.042)) * mL
+    _NP_conc_bio    = _Npdosing * _Vdosing * _fTzone / VTzone
+    NP_conc = (float(cfg["NP_conc_per_mL"]) / mL
+               if "NP_conc_per_mL" in cfg else _NP_conc_bio)
+
+    # ── In-vitro / SPR context (scan-npdosing-langmuir) ──────────────────────
+    # NP_conc = Npdosing_SPR_per_mL directly; cell_conc = 1/V_SPR (single chip).
+    # Accepts both 'Npdosing_SPR_per_mL' (new) and 'NP_conc_SPR_per_mL' (old) for
+    # backwards compatibility with existing YAML files.
+    A_SPR         = float(cfg.get("A_SPR_mm2",  1.0   )) * mm2
+    V_SPR         = float(cfg.get("V_SPR_mL",   6.0e-5)) * mL
+    _npdosing_spr = cfg.get("Npdosing_SPR_per_mL", cfg.get("NP_conc_SPR_per_mL", 4.0e11))
+    NP_conc_spr   = float(_npdosing_spr) / mL
     cell_conc_spr = 1.0 / V_SPR
 
-    # Codependent receptor densities (scan-both-polymer-models)
+    # ── Codependent receptor densities ────────────────────────────────────────
+    # Parsed without name validation here; each command validates against its own
+    # receptor source (scan-both-polymer-models: YAML receptors list via _sbpm;
+    # scan-combinations: CSV receptor names in Step D).
+    # Exception: if 'receptors' was provided in this YAML, validate against it now
+    # to catch typos at load time for scan-both-polymer-models workflows.
     raw_codep = cfg.get("codependent_receptors", []) or []
     codep: dict = {}
     for entry in raw_codep:
         sec = entry["secondary"]
         pri = entry["primary"]
-        if sec not in _rec_dicts:
-            raise ValueError(
-                f"codependent_receptors secondary '{sec}' not in receptors list"
-            )
-        if pri not in _rec_dicts:
-            raise ValueError(
-                f"codependent_receptors primary '{pri}' not in receptors list"
-            )
+        if _rec_dicts:
+            if sec not in _rec_dicts:
+                raise ValueError(
+                    f"codependent_receptors secondary '{sec}' not in receptors list"
+                )
+            if pri not in _rec_dicts:
+                raise ValueError(
+                    f"codependent_receptors primary '{pri}' not in receptors list"
+                )
         codep[sec] = (pri, float(entry["ratio"]))
 
     # Sweep-control parameters (scan-both-polymer-models)
@@ -305,7 +343,6 @@ def _load_system_vars_yaml(path: Path) -> dict:
     # sigma_R_min/max are in nm⁻² (internal units); convert / um2.
     sweep_target_sigma_R        = [float(x) for x in cfg.get("target_sigma_R", []) or []]
     sweep_target_sigma_R_labels = list(cfg.get("target_sigma_R_labels", []) or [])
-    sweep_compare               = bool(cfg.get("compare_polymer_models", True))
     sweep_models                = list(cfg.get("polymer_models", ["gaussian", "Flory-exact"]) or [])
     sweep_n_pts_1D              = int(cfg.get("n_pts_1D", 50))
     sweep_n_pts_2D              = int(cfg.get("n_pts_2D", 20))
@@ -328,7 +365,6 @@ def _load_system_vars_yaml(path: Path) -> dict:
         "codependent_receptors": codep,
         "target_sigma_R":        sweep_target_sigma_R,
         "target_sigma_R_labels": sweep_target_sigma_R_labels,
-        "compare_polymer_models": sweep_compare,
         "polymer_models":        sweep_models,
         "n_pts_1D":              sweep_n_pts_1D,
         "n_pts_2D":              sweep_n_pts_2D,
@@ -985,10 +1021,6 @@ def scan_both_polymer_models_cmd(
         "--sigma-r-max",
         help="Sweep upper bound [µm⁻²] (overrides YAML/module default).",
     )] = None,
-    compare: Annotated[Optional[bool], typer.Option(
-        "--compare/--no-compare",
-        help="Run all polymer models (--compare) or only the first (--no-compare).",
-    )] = None,
     polymer_model: Annotated[Optional[List[str]], typer.Option(
         "--polymer-model",
         help="Polymer model name, repeatable (e.g. --polymer-model gaussian --polymer-model Flory-exact).",
@@ -1033,7 +1065,6 @@ def scan_both_polymer_models_cmd(
         _sbpm.codependent_receptors   = _v["codependent_receptors"]
         _sbpm.target_sigma_R          = _v["target_sigma_R"]
         _sbpm.target_sigma_R_labels   = _v["target_sigma_R_labels"]
-        _sbpm.compare_polymer_models  = _v["compare_polymer_models"]
         _sbpm.polymer_models          = _v["polymer_models"]
         _sbpm.n_pts_1D                = _v["n_pts_1D"]
         _sbpm.n_pts_2D                = _v["n_pts_2D"]
@@ -1045,7 +1076,6 @@ def scan_both_polymer_models_cmd(
     if n_pts_2d    is not None:  _sbpm.n_pts_2D               = n_pts_2d
     if sigma_r_min is not None:  _sbpm.sigma_R_min            = sigma_r_min / um2
     if sigma_r_max is not None:  _sbpm.sigma_R_max            = sigma_r_max / um2
-    if compare     is not None:  _sbpm.compare_polymer_models = compare
     if polymer_model:            _sbpm.polymer_models         = list(polymer_model)
     if target_sigma_r:           _sbpm.target_sigma_R         = list(target_sigma_r)
     if target_label:             _sbpm.target_sigma_R_labels  = list(target_label)
@@ -1099,9 +1129,7 @@ def scan_both_polymer_models_cmd(
         print(f"Codependent receptors: {_sbpm.codependent_receptors}")
     print(f"Independent axes ({n_independent}): {primary_names}")
 
-    models_to_run = (
-        _sbpm.polymer_models if _sbpm.compare_polymer_models else [_sbpm.polymer_models[0]]
-    )
+    models_to_run = list(_sbpm.polymer_models)
 
     results = {}
     for model_name in models_to_run:
@@ -1156,10 +1184,6 @@ def scan_combinations_cmd(
         "--n-pts-2d",
         help="Grid points per axis for 2D sweeps (overrides YAML/module default).",
     )] = None,
-    compare: Annotated[Optional[bool], typer.Option(
-        "--compare/--no-compare",
-        help="Run all polymer models (--compare) or only the first (--no-compare).",
-    )] = None,
     polymer_model: Annotated[Optional[List[str]], typer.Option(
         "--polymer-model",
         help="Polymer model name, repeatable (e.g. --polymer-model gaussian).",
@@ -1169,6 +1193,15 @@ def scan_combinations_cmd(
         help="In a 2-binder run, fraction of sigma_L given to the first binder "
              "(second binder gets 1 - ratio). Default 0.5.",
     )] = 0.5,
+    target_sigma_r: Annotated[Optional[List[float]], typer.Option(
+        "--target-sigma-r",
+        help="Reference density marker [µm⁻²], repeatable. Overrides YAML value.",
+    )] = None,
+    target_label: Annotated[Optional[List[str]], typer.Option(
+        "--target-label",
+        help="Label for reference marker (same order as --target-sigma-r), repeatable. "
+             "Overrides YAML value.",
+    )] = None,
     n_workers: Annotated[int, typer.Option(
         "--n-workers",
         help="Number of parallel worker processes. Default 1 (serial). "
@@ -1201,8 +1234,10 @@ def scan_combinations_cmd(
     os.makedirs(output_dir, exist_ok=True)
 
     # ── Step A: load NP parameters and keep _sbpm physics globals consistent ──
+    yaml_codependent_map: dict = {}
     if config is not None:
         config_vars = _load_system_vars_yaml(config)
+        yaml_codependent_map = config_vars["codependent_receptors"]
         nanoparticle_params = config_vars  # has sigma_L, amono, akuhn, NmonoL, NmonoS, binder_size
         # Patch _sbpm physics globals so _make_system uses the same NP as nanoparticle_params.
         # _make_system reads R_NP, A_cell, NP_conc, cell_conc, nonspec_interaction by name
@@ -1216,7 +1251,6 @@ def scan_combinations_cmd(
         _sbpm.n_pts_2D               = config_vars["n_pts_2D"]
         _sbpm.sigma_R_min            = config_vars["sigma_R_min"]
         _sbpm.sigma_R_max            = config_vars["sigma_R_max"]
-        _sbpm.compare_polymer_models = config_vars["compare_polymer_models"]
         _sbpm.polymer_models         = config_vars["polymer_models"]
         _sbpm.target_sigma_R         = config_vars["target_sigma_R"]
         _sbpm.target_sigma_R_labels  = config_vars["target_sigma_R_labels"]
@@ -1233,12 +1267,13 @@ def scan_combinations_cmd(
         # _sbpm physics globals are already at these defaults from its module-level import
 
     # ── Step B: CLI sweep-parameter overrides ────────────────────────────────
-    if n_pts_1d    is not None:  _sbpm.n_pts_1D               = n_pts_1d
-    if n_pts_2d    is not None:  _sbpm.n_pts_2D               = n_pts_2d
-    if sigma_r_min is not None:  _sbpm.sigma_R_min            = sigma_r_min / um2
-    if sigma_r_max is not None:  _sbpm.sigma_R_max            = sigma_r_max / um2
-    if compare     is not None:  _sbpm.compare_polymer_models = compare
-    if polymer_model:            _sbpm.polymer_models         = list(polymer_model)
+    if n_pts_1d      is not None:  _sbpm.n_pts_1D               = n_pts_1d
+    if n_pts_2d      is not None:  _sbpm.n_pts_2D               = n_pts_2d
+    if sigma_r_min   is not None:  _sbpm.sigma_R_min            = sigma_r_min / um2
+    if sigma_r_max   is not None:  _sbpm.sigma_R_max            = sigma_r_max / um2
+    if polymer_model:              _sbpm.polymer_models         = list(polymer_model)
+    if target_sigma_r:             _sbpm.target_sigma_R        = list(target_sigma_r)
+    if target_label:               _sbpm.target_sigma_R_labels = list(target_label)
 
     # ── Step C: read CSV ──────────────────────────────────────────────────────
     binders_data  = _read_binders_csv(csv_path)
@@ -1247,8 +1282,9 @@ def scan_combinations_cmd(
     print(f"Loaded {len(binders_data)} binders across "
           f"{len(all_receptors)} receptor types: {all_receptors}")
 
-    # ── Step D: parse or interactively prompt for codependent receptor densities
-    codependent_map: dict = {}
+    # ── Step D: build codependent receptor map (YAML base + CLI overrides) ────
+    # Start from YAML codependencies; --codependent entries override per-key.
+    codependent_map: dict = dict(yaml_codependent_map)
     if codependent:
         for entry in codependent:
             parts = entry.split(":")
@@ -1258,11 +1294,20 @@ def scan_combinations_cmd(
                 )
             secondary, primary, ratio_str = parts
             codependent_map[secondary] = (primary, float(ratio_str))
+
+    # Validate all entries against CSV receptor names.
+    if codependent_map:
         for secondary, (primary, _) in codependent_map.items():
             if secondary not in all_receptors:
-                typer.echo(f"Warning: codependent secondary '{secondary}' not found in CSV receptors.")
+                raise typer.BadParameter(
+                    f"Codependent secondary '{secondary}' not found in CSV receptors: "
+                    f"{sorted(all_receptors)}"
+                )
             if primary not in all_receptors:
-                typer.echo(f"Warning: codependent primary '{primary}' not found in CSV receptors.")
+                raise typer.BadParameter(
+                    f"Codependent primary '{primary}' not found in CSV receptors: "
+                    f"{sorted(all_receptors)}"
+                )
     elif len(all_receptors) > 2:
         typer.echo(
             f"\nFound {len(all_receptors)} receptor types: {all_receptors}.\n"
@@ -1294,10 +1339,7 @@ def scan_combinations_cmd(
     print(f"\n{len(single_binder_runs)} single-binder + {len(pair_runs)} pair runs "
           f"= {len(all_runs)} total.\n")
 
-    models_to_run = (
-        _sbpm.polymer_models if _sbpm.compare_polymer_models
-        else [_sbpm.polymer_models[0]]
-    )
+    models_to_run = list(_sbpm.polymer_models)
 
     # Snapshot physics globals once; each worker receives them by value.
     physics_snapshot = {

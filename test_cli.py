@@ -91,7 +91,6 @@ def _save_sbpm_state():
         _sbpm.sigma_R_max,
         _sbpm.n_pts_1D,
         _sbpm.n_pts_2D,
-        _sbpm.compare_polymer_models,
         _sbpm.polymer_models,
         _sbpm.target_sigma_R,
         _sbpm.target_sigma_R_labels,
@@ -111,7 +110,6 @@ def _restore_sbpm_state(state):
         _sbpm.sigma_R_max,
         _sbpm.n_pts_1D,
         _sbpm.n_pts_2D,
-        _sbpm.compare_polymer_models,
         _sbpm.polymer_models,
         _sbpm.target_sigma_R,
         _sbpm.target_sigma_R_labels,
@@ -606,7 +604,6 @@ class TestCLIBothModelsFast(unittest.TestCase):
         _sbpm.n_pts_1D               = _N_PTS
         _sbpm.sigma_R_min            = _SMIN
         _sbpm.sigma_R_max            = _SMAX
-        _sbpm.compare_polymer_models = False
         _sbpm.polymer_models         = ["gaussian"]
         # data_polymers is NOT patched: default (from system_variables_invivo_multi)
         # has receptor name "default" → primary_names = ["default"] → 1D sweep.
@@ -702,7 +699,7 @@ _YAML_TWO_RECS_CODEP = (
     "  - name: lig_B\n    type: binding\n    receptor: recB\n"
     "codependent_receptors:\n"
     "  - secondary: recB\n    primary: recA\n    ratio: 1.0\n"
-    "n_pts_1D: 3\ncompare_polymer_models: false\n"
+    "n_pts_1D: 3\n"
 )
 
 
@@ -741,7 +738,7 @@ class TestGenerateTemplate(unittest.TestCase):
         for key in [
             "sigma_R_min_per_um2", "sigma_R_max_per_um2",
             "n_pts_1D", "n_pts_2D",
-            "compare_polymer_models", "polymer_models",
+            "polymer_models",
             "target_sigma_R", "target_sigma_R_labels",
         ]:
             with self.subTest(key=key):
@@ -1173,7 +1170,6 @@ class TestLoadYamlSweepControl(unittest.TestCase):
         b = self.base
         self.assertEqual(b["n_pts_1D"], 50)
         self.assertEqual(b["n_pts_2D"], 20)
-        self.assertTrue(b["compare_polymer_models"])
         self.assertEqual(b["polymer_models"], ["gaussian", "Flory-exact"])
         self.assertEqual(b["target_sigma_R"], [])
         self.assertEqual(b["target_sigma_R_labels"], [])
@@ -1206,12 +1202,6 @@ class TestLoadYamlSweepControl(unittest.TestCase):
             _write_temp_yaml(self.tmp_dir, _YAML_MINIMAL + "n_pts_2D: 8\n")
         )
         self.assertEqual(v["n_pts_2D"], 8)
-
-    def test_compare_polymer_models_false(self):
-        v = cli._load_system_vars_yaml(
-            _write_temp_yaml(self.tmp_dir, _YAML_MINIMAL + "compare_polymer_models: false\n")
-        )
-        self.assertIs(v["compare_polymer_models"], False)
 
     def test_polymer_models_single(self):
         v = cli._load_system_vars_yaml(
@@ -1293,8 +1283,201 @@ class TestLoadYamlSweepControl(unittest.TestCase):
             cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_bad))
 
 
+class TestLoadYamlPhysicalParams(unittest.TestCase):
+    """Unit tests for optional KD_nM, optional receptors/ligands, and the physical
+    parameter derivation for cell_conc / NP_conc added to _load_system_vars_yaml."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp_dir, ignore_errors=True)
+
+    # ── KD_nM optional ────────────────────────────────────────────────────────
+
+    def test_kd_optional_inert_only(self):
+        """YAML without KD_nM but with only inert ligands must not raise."""
+        yaml_no_kd = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "receptors:\n  - name: default\n"
+            "ligands:\n  - name: PEG2K\n    type: inert\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_no_kd))
+        self.assertIsNotNone(v)
+
+    def test_kd_optional_no_receptors_no_ligands(self):
+        """YAML without KD_nM, receptors, or ligands (scan-combinations use case) must not raise."""
+        yaml_bare = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_bare))
+        self.assertEqual(v["data_polymers"], {})
+        self.assertIsNone(v["receptor"])
+
+    def test_kd_optional_binding_ligand_no_kd_raises(self):
+        """Binding ligand with no per-ligand KD_nM and no global KD_nM must raise ValueError."""
+        yaml_bad = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "receptors:\n  - name: default\n"
+            "ligands:\n  - name: lig\n    type: binding\n    receptor: default\n"
+        )
+        with self.assertRaises(ValueError):
+            cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_bad))
+
+    # ── Physical derivation for in-vivo ──────────────────────────────────────
+
+    def test_cell_conc_derived_from_biology(self):
+        """cell_conc derived from N_lympho, T_cell_fraction, V_spleen_mm3."""
+        from units import mL
+        yaml_bio = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "N_lympho: 7.5e7\nT_cell_fraction: 0.25\nV_spleen_mm3: 100.0\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_bio))
+        np.testing.assert_allclose(v["cell_conc"], 1.875e8 / mL, rtol=1e-10)
+
+    def test_np_conc_derived_from_dosing(self):
+        """NP_conc derived from Npdosing_per_mL, Vdosing_mL, fTzone, VTzone_mL."""
+        from units import mL
+        yaml_dose = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "Npdosing_per_mL: 8.0e12\nVdosing_mL: 0.1\nfTzone: 0.1\nVTzone_mL: 0.042\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_dose))
+        expected = 8e12 * 0.1 * 0.1 / 0.042 / mL
+        np.testing.assert_allclose(v["NP_conc"], expected, rtol=1e-10)
+
+    def test_np_conc_override_wins(self):
+        """NP_conc_per_mL direct override takes precedence over derived value."""
+        from units import mL
+        yaml_override = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "Npdosing_per_mL: 8.0e12\nVdosing_mL: 0.1\nfTzone: 0.1\nVTzone_mL: 0.042\n"
+            "NP_conc_per_mL: 1.0e10\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_override))
+        np.testing.assert_allclose(v["NP_conc"], 1.0e10 / mL, rtol=1e-10)
+
+    def test_spr_old_key_alias(self):
+        """Old key NP_conc_SPR_per_mL is accepted as alias for Npdosing_SPR_per_mL."""
+        from units import mL
+        yaml_spr = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "NP_conc_SPR_per_mL: 4.0e11\n"
+        )
+        v = cli._load_system_vars_yaml(_write_temp_yaml(self.tmp_dir, yaml_spr))
+        np.testing.assert_allclose(v["NP_conc_spr"], 4.0e11 / mL, rtol=1e-10)
+
+
+class TestScanCombinations_CodependentFromYaml(unittest.TestCase):
+    """Functional test: codependent_receptors in YAML reduces a 2-receptor binder to 1D sweep."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        cls.tmp   = Path(tempfile.mkdtemp())
+        cls.out   = cls.tmp / "out"
+        # YAML with codependent R2→R1 and no KD_nM (taken from CSV)
+        yaml_content = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "codependent_receptors:\n"
+            "  - secondary: R2\n    primary: R1\n    ratio: 1.0\n"
+            "n_pts_1D: 3\n"
+        )
+        yaml_path = _write_temp_yaml(cls.tmp, yaml_content)
+        # Binder A targets R1 and R2; without codep this would be 2D → with codep, 1D.
+        csv_content = "Target,A\nR1,100.0\nR2,200.0\n"
+        cli.scan_combinations_cmd(
+            csv_path=_write_temp_csv(cls.tmp, csv_content),
+            output_dir=cls.out,
+            config=yaml_path,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_1d_output_exists(self):
+        self.assertTrue((self.out / "A" / "adsorption_gaussian.dat").exists())
+
+    def test_2d_output_absent(self):
+        self.assertFalse((self.out / "A" / "adsorption_2rec_gaussian.dat").exists())
+
+
+class TestScanCombinations_CodependentBadReceptorName(unittest.TestCase):
+    """YAML codependent with a receptor name absent from the CSV must raise BadParameter."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        yaml_content = (
+            "R_NP_nm: 35.0\nN_ligands: 150\n"
+            "PEG_monomer_size_nm: 0.28\nPEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\nPEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\nbinder_linear_size_nm: 3.5\n"
+            "nonspec_interaction_kT: 0.0\n"
+            "codependent_receptors:\n"
+            "  - secondary: ghost\n    primary: R1\n    ratio: 1.0\n"
+        )
+        cls.yaml_path = _write_temp_yaml(cls.tmp, yaml_content)
+        cls.csv_content = "Target,A\nR1,100.0\n"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_bad_secondary_raises(self):
+        with self.assertRaises(SystemExit):
+            cli.scan_combinations_cmd(
+                csv_path=_write_temp_csv(self.tmp, self.csv_content),
+                output_dir=self.tmp / "out",
+                config=self.yaml_path,
+                polymer_model=["gaussian"],
+                n_workers=1,
+                n_cores_per_run=1,
+            )
+
+
 class TestBothModelsSweepParamsViaYaml(unittest.TestCase):
-    """YAML sweep fields (n_pts_1D, sigma_R range, compare flag) propagate correctly
+    """YAML sweep fields (n_pts_1D, sigma_R range, polymer_models) propagate correctly
     to the scan_both_polymer_models_cmd output."""
 
     @classmethod
@@ -1305,7 +1488,7 @@ class TestBothModelsSweepParamsViaYaml(unittest.TestCase):
         yaml_content = (
             _YAML_MINIMAL
             + "n_pts_1D: 3\n"
-            + "compare_polymer_models: false\n"
+            + "polymer_models:\n  - gaussian\n"
             + "sigma_R_min_per_um2: 10.0\n"
             + "sigma_R_max_per_um2: 100.0\n"
         )
@@ -1398,7 +1581,6 @@ class TestBothModelsCliOverrides(unittest.TestCase):
                 n_pts_1d=3,
                 sigma_r_min=10.0,
                 sigma_r_max=100.0,
-                compare=False,
                 polymer_model=["gaussian"],
             )
         finally:
@@ -1531,7 +1713,6 @@ class TestScanCombinations_BasicOutput(unittest.TestCase):
             csv_path=_write_temp_csv(cls.tmp, csv_content),
             output_dir=cls.out,
             n_pts_1d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_cores_per_run=1,
         )
@@ -1580,7 +1761,6 @@ class TestScanCombinations_SkipLogic(unittest.TestCase):
             codependent=["R2:R1:1.0"],
             n_pts_1d=3,
             n_pts_2d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_cores_per_run=1,
         )
@@ -1612,7 +1792,6 @@ class TestScanCombinations_CodepReduces2Recs_To1D(unittest.TestCase):
             output_dir=cls.out,
             codependent=["R2:R1:1.0"],
             n_pts_1d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_cores_per_run=1,
         )
@@ -1645,7 +1824,6 @@ class TestScanCombinations_ParallelEquality(unittest.TestCase):
             csv_path=cls.csv_path,
             output_dir=cls.out_serial,
             n_pts_1d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_workers=1,
             n_cores_per_run=1,
@@ -1657,7 +1835,6 @@ class TestScanCombinations_ParallelEquality(unittest.TestCase):
             csv_path=cls.csv_path,
             output_dir=cls.out_parallel,
             n_pts_1d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_workers=2,
             n_cores_per_run=1,
@@ -1708,7 +1885,6 @@ class TestScanCombinations_NcoresParallelEquality(unittest.TestCase):
             output_dir=cls.out_serial,
             n_pts_1d=3,
             n_pts_2d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_workers=1,
             n_cores_per_run=1,
@@ -1721,7 +1897,6 @@ class TestScanCombinations_NcoresParallelEquality(unittest.TestCase):
             output_dir=cls.out_parallel,
             n_pts_1d=3,
             n_pts_2d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_workers=1,
             n_cores_per_run=2,
@@ -1767,7 +1942,6 @@ class TestScanCombinations_JobRange(unittest.TestCase):
             csv_path=_write_temp_csv(cls.tmp, csv_content),
             output_dir=cls.out,
             n_pts_1d=3,
-            compare=False,
             polymer_model=["gaussian"],
             n_workers=1,
             n_cores_per_run=1,
