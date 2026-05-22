@@ -1533,6 +1533,7 @@ class TestScanCombinations_BasicOutput(unittest.TestCase):
             n_pts_1d=3,
             compare=False,
             polymer_model=["gaussian"],
+            n_cores_per_run=1,
         )
 
     @classmethod
@@ -1581,6 +1582,7 @@ class TestScanCombinations_SkipLogic(unittest.TestCase):
             n_pts_2d=3,
             compare=False,
             polymer_model=["gaussian"],
+            n_cores_per_run=1,
         )
 
     @classmethod
@@ -1612,6 +1614,7 @@ class TestScanCombinations_CodepReduces2Recs_To1D(unittest.TestCase):
             n_pts_1d=3,
             compare=False,
             polymer_model=["gaussian"],
+            n_cores_per_run=1,
         )
 
     @classmethod
@@ -1645,6 +1648,7 @@ class TestScanCombinations_ParallelEquality(unittest.TestCase):
             compare=False,
             polymer_model=["gaussian"],
             n_workers=1,
+            n_cores_per_run=1,
         )
         _restore_sbpm_state(cls.saved)
 
@@ -1656,6 +1660,7 @@ class TestScanCombinations_ParallelEquality(unittest.TestCase):
             compare=False,
             polymer_model=["gaussian"],
             n_workers=2,
+            n_cores_per_run=1,
         )
         _restore_sbpm_state(saved2)
 
@@ -1680,6 +1685,117 @@ class TestScanCombinations_ParallelEquality(unittest.TestCase):
 
     def test_pair_identical(self):
         self._check_subdir("lig1+lig2")
+
+
+class TestScanCombinations_NcoresParallelEquality(unittest.TestCase):
+    """n_cores_per_run=2 (parallel K_bind) must produce the same .dat output as n_cores_per_run=1.
+
+    CSV has lig1→R1 only and lig2→R2 only, so the pair run exercises sweep_2axes
+    (2D K_bind grid), which is the code path that _parallel_calculate_k_bind accelerates.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        cls.tmp   = Path(tempfile.mkdtemp())
+        csv_content = "Target,lig1,lig2\nR1,150.0,\nR2,,300.0\n"
+        cls.csv_path = _write_temp_csv(cls.tmp, csv_content)
+        cls.out_serial   = cls.tmp / "serial"
+        cls.out_parallel = cls.tmp / "parallel"
+
+        cli.scan_combinations_cmd(
+            csv_path=cls.csv_path,
+            output_dir=cls.out_serial,
+            n_pts_1d=3,
+            n_pts_2d=3,
+            compare=False,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+        )
+        _restore_sbpm_state(cls.saved)
+
+        saved2 = _save_sbpm_state()
+        cli.scan_combinations_cmd(
+            csv_path=cls.csv_path,
+            output_dir=cls.out_parallel,
+            n_pts_1d=3,
+            n_pts_2d=3,
+            compare=False,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=2,
+        )
+        _restore_sbpm_state(saved2)
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _check_subdir(self, subdir, fname):
+        s = _load_dat(self.out_serial   / subdir / fname)
+        p = _load_dat(self.out_parallel / subdir / fname)
+        np.testing.assert_array_almost_equal(
+            s, p, decimal=10,
+            err_msg=f"serial vs parallel K_bind mismatch in {subdir}/{fname}",
+        )
+
+    def test_lig1_identical(self):
+        self._check_subdir("lig1", "adsorption_gaussian.dat")
+
+    def test_lig2_identical(self):
+        self._check_subdir("lig2", "adsorption_gaussian.dat")
+
+    def test_pair_identical(self):
+        self._check_subdir("lig1+lig2", "adsorption_2rec_gaussian.dat")
+
+
+class TestScanCombinations_JobRange(unittest.TestCase):
+    """--job-range 1:2 executes only the first two non-skipped runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        cls.tmp   = Path(tempfile.mkdtemp())
+        cls.out   = cls.tmp / "out"
+        # 3 binders all targeting R1 → 3 single + 3 pair runs = 6 non-skipped total.
+        # Sorted run order: lig1, lig2, lig3, lig1+lig2, lig1+lig3, lig2+lig3.
+        # job_range="1:2" → only lig1 and lig2 execute.
+        csv_content = "Target,lig1,lig2,lig3\nR1,150.0,300.0,450.0\n"
+        cli.scan_combinations_cmd(
+            csv_path=_write_temp_csv(cls.tmp, csv_content),
+            output_dir=cls.out,
+            n_pts_1d=3,
+            compare=False,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+            job_range="1:2",
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_lig1_ran(self):
+        self.assertTrue((self.out / "lig1" / "adsorption_gaussian.dat").exists())
+
+    def test_lig2_ran(self):
+        self.assertTrue((self.out / "lig2" / "adsorption_gaussian.dat").exists())
+
+    def test_lig3_absent(self):
+        self.assertFalse((self.out / "lig3").exists())
+
+    def test_pair_lig1_lig2_absent(self):
+        self.assertFalse((self.out / "lig1+lig2").exists())
+
+    def test_pair_lig1_lig3_absent(self):
+        self.assertFalse((self.out / "lig1+lig3").exists())
+
+    def test_pair_lig2_lig3_absent(self):
+        self.assertFalse((self.out / "lig2+lig3").exists())
 
 
 if __name__ == "__main__":

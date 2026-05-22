@@ -577,14 +577,16 @@ def _execute_run(run_spec: dict):
     print(f"=== {run_name}  |  receptors: {list(receptor_map)}  "
           f"|  axes: {primary_receptor_names} ===", flush=True)
 
+    n_cores = run_spec.get("n_cores_per_run", 1)
     results = {}
     for model_name in run_spec["models_to_run"]:
         if n_primary_axes == 1:
-            results[model_name] = _sbpm.sweep_1axis(model_name, primary_receptor_names[0])
+            results[model_name] = _sbpm.sweep_1axis(
+                model_name, primary_receptor_names[0], n_workers=n_cores)
         else:
             results[model_name] = _sbpm.sweep_2axes(
-                model_name, primary_receptor_names[0], primary_receptor_names[1]
-            )
+                model_name, primary_receptor_names[0], primary_receptor_names[1],
+                n_workers=n_cores)
 
     _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
     return run_name, None
@@ -1172,6 +1174,17 @@ def scan_combinations_cmd(
         help="Number of parallel worker processes. Default 1 (serial). "
              "Pass -1 to use all available CPU cores.",
     )] = 1,
+    n_cores_per_run: Annotated[int, typer.Option(
+        "--n-cores-per-run",
+        help="Worker processes used for K_bind precomputation within each combination run "
+             "(Level 2 parallelism). Default 4. Set to 1 to disable.",
+    )] = 4,
+    job_range: Annotated[Optional[str], typer.Option(
+        "--job-range",
+        help='1-indexed inclusive range "START:END" of non-skipped runs to execute. '
+             'Allows splitting a batch across HPC nodes. '
+             'Example: --job-range 1:4 runs the first 4 non-skipped runs.',
+    )] = None,
 ):
     """Receptor density sweeps for every single binder and pair of binders in a CSV.
 
@@ -1329,8 +1342,27 @@ def scan_combinations_cmd(
             "codependent_map":   codependent_map,
             "run_output_dir":    str(os.path.join(str(output_dir), run_name)),
             "models_to_run":     models_to_run,
+            "n_cores_per_run":   n_cores_per_run,
             **physics_snapshot,
         })
+
+    n_total = len(run_specs)
+    print(f"{n_total} non-skipped runs to dispatch.")
+
+    if job_range is not None:
+        parts = job_range.split(":")
+        if len(parts) != 2:
+            raise typer.BadParameter(
+                f"--job-range must be 'START:END' (1-indexed, inclusive), got '{job_range}'"
+            )
+        s, e = int(parts[0]) - 1, int(parts[1])
+        if s < 0 or e > n_total or s >= e:
+            raise typer.BadParameter(
+                f"--job-range {job_range} is out of bounds for {n_total} non-skipped runs "
+                f"(valid range: 1:{n_total})"
+            )
+        run_specs = run_specs[s:e]
+        print(f"Job range {job_range}: running {len(run_specs)} of {n_total} runs.")
 
     actual_workers = os.cpu_count() if n_workers == -1 else n_workers
 

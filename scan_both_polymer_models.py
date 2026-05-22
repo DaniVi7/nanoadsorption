@@ -3,9 +3,11 @@ from units import *
 from system_variables_invivo_multi import *
 from mpmath import mp
 import copy
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers '3d' projection
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 mp.dps = 50
 assert mp.dps >= 30
@@ -174,13 +176,117 @@ def _axis_label(primary_name, log=False):
     return base + f"\n[{dep_str}]"
 
 
+# ── Level 2 K_bind parallelization ───────────────────────────────────────────
+
+def _compute_kbind_for_combos(spec):
+    """Worker: compute K_bind for a subset of NR combos. Top-level function (picklable).
+
+    spec keys: data_polymers, polymer_model_name, R_NP, A_cell, NP_conc, cell_conc,
+               nonspec_interaction, NP_excluded_area, receptor_names, combos.
+    Returns a list of K_bind values in the same order as spec["combos"].
+    """
+    dp_raw = copy.deepcopy(spec["data_polymers"])
+    dp     = _expand_multireceptor_ligands(dp_raw)
+
+    rec_refs = {}
+    for poly in dp.values():
+        if "receptor" in poly:
+            rec = poly["receptor"]
+            if rec["name"] not in rec_refs:
+                rec_refs[rec["name"]] = rec
+
+    system = MultivalentBinding(
+        kT=kT, R_NP=spec["R_NP"], data_polymers=dp,
+        binding_model="exact", polymer_model=spec["polymer_model_name"],
+        A_cell=spec["A_cell"], NP_conc=spec["NP_conc"],
+        cell_conc=spec["cell_conc"], nonspec_interaction=spec["nonspec_interaction"],
+    )
+
+    NP_excluded_area = spec["NP_excluded_area"]
+    rec_names        = spec["receptor_names"]
+    results          = []
+
+    for combo in spec["combos"]:
+        if all(nr == 0 for nr in combo):
+            results.append(0.0)
+        else:
+            for i, name in enumerate(rec_names):
+                rec_refs[name]["sigma_R"] = combo[i] / NP_excluded_area
+            results.append(system.calculate_binding_constant())
+
+    return results
+
+
+def _parallel_calculate_k_bind(max_N_receptor, rec_refs, polymer_model_name, n_workers):
+    """Parallel replacement for system.calculate_K_bind_vs_receptors.
+
+    Distributes NR combos across n_workers worker processes. Returns the same
+    format as calculate_K_bind_vs_receptors (1D ndarray for single receptor,
+    tuple for multi-receptor). Uses module-level data_polymers and physics globals
+    (set correctly by _execute_run before sweep_* is called).
+    """
+    rec_names        = sorted(rec_refs.keys())
+    n_rec            = len(rec_names)
+    NP_excluded_area = float((2.0 * R_NP) ** 2)
+
+    if n_rec == 1:
+        combos = [(nr,) for nr in range(1, max_N_receptor)]
+    else:
+        axes   = [range(0, max_N_receptor)] * n_rec
+        combos = list(itertools.product(*axes))
+
+    n_combos   = len(combos)
+    chunk_size = max(1, (n_combos + n_workers - 1) // n_workers)
+    chunks     = [combos[i:i + chunk_size] for i in range(0, n_combos, chunk_size)]
+
+    base_spec = {
+        "data_polymers":      copy.deepcopy(data_polymers),
+        "polymer_model_name": polymer_model_name,
+        "R_NP":               float(R_NP),
+        "A_cell":             float(A_cell),
+        "NP_conc":            float(NP_conc),
+        "cell_conc":          float(cell_conc),
+        "nonspec_interaction": float(nonspec_interaction),
+        "NP_excluded_area":   NP_excluded_area,
+        "receptor_names":     rec_names,
+    }
+
+    results_flat = [None] * n_combos
+    chunk_starts = [i * chunk_size for i in range(len(chunks))]
+
+    with ProcessPoolExecutor(max_workers=min(n_workers, len(chunks))) as pool:
+        futures = {
+            pool.submit(_compute_kbind_for_combos, {**base_spec, "combos": chunk}): start
+            for chunk, start in zip(chunks, chunk_starts)
+        }
+        for future in as_completed(futures):
+            start = futures[future]
+            for i, val in enumerate(future.result()):
+                results_flat[start + i] = val
+
+    if n_rec == 1:
+        K_bind_arr    = np.empty(max_N_receptor, dtype=object)
+        K_bind_arr[0] = 0.0
+        for i, (nr,) in enumerate(combos):
+            K_bind_arr[nr] = results_flat[i]
+        return K_bind_arr
+    else:
+        K_bind_flat = np.empty(n_combos, dtype=object)
+        for i, val in enumerate(results_flat):
+            K_bind_flat[i] = val
+        grid_shape = tuple(max_N_receptor for _ in range(n_rec))
+        NR_aves    = [float(NP_excluded_area * rec_refs[n]["sigma_R"]) for n in rec_names]
+        return K_bind_flat, grid_shape, NR_aves, rec_names
+
+
 # ── Case A: 1-axis sweep ──────────────────────────────────────────────────────
-def sweep_1axis(polymer_model_name, primary_name):
+def sweep_1axis(polymer_model_name, primary_name, n_workers=1):
     """Sweep sigma_R along one independent receptor axis.
 
     Codependent receptors are updated at every point via _resolve_sigma_R.
     Returns {"sigma_R_um2", "bound_fraction", "n_ads", "primary_name"}.
     Uses module-level sigma_R_min, sigma_R_max, n_pts_1D.
+    n_workers > 1 parallelizes the K_bind precomputation across worker processes.
     """
     system, rec_refs = _make_system(polymer_model_name)
     sigma_R_arr = np.logspace(np.log10(sigma_R_min), np.log10(sigma_R_max), n_pts_1D)
@@ -192,7 +298,11 @@ def sweep_1axis(polymer_model_name, primary_name):
     max_N_receptor = max_NR_ave + 4 * (max_NR_ave + 1) + 1
 
     print(f"  [{polymer_model_name}] Precomputing K_bind table (max NR = {max_N_receptor})...")
-    K_bind_data = system.calculate_K_bind_vs_receptors(max_N_receptor)
+    if n_workers > 1:
+        K_bind_data = _parallel_calculate_k_bind(
+            max_N_receptor, rec_refs, polymer_model_name, n_workers)
+    else:
+        K_bind_data = system.calculate_K_bind_vs_receptors(max_N_receptor)
     is_multi    = isinstance(K_bind_data, tuple)
     if is_multi:
         K_bind_flat, grid_shape, _, rec_names_ordered = K_bind_data
@@ -228,7 +338,7 @@ def sweep_1axis(polymer_model_name, primary_name):
 
 
 # ── Case B: 2-axis grid sweep ─────────────────────────────────────────────────
-def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2):
+def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1):
     """Sweep (sigma_R1, sigma_R2) on a 2D grid for two independent receptor axes.
 
     Codependent receptors are updated at every grid point via _resolve_sigma_R.
@@ -236,6 +346,7 @@ def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2):
     receptor counts). Only NR_aves are updated per grid point.
     Returns {"sigma_R1_um2", "sigma_R2_um2", "bound_fraction", "n_ads", "rec_names"}.
     bound_fraction[i, j] = f(sigma_R1[i], sigma_R2[j]).
+    n_workers > 1 parallelizes the K_bind precomputation across worker processes.
     """
     system, rec_refs = _make_system(polymer_model_name)
     sigma_R_arr = np.logspace(np.log10(sigma_R_min), np.log10(sigma_R_max), n_pts_2D)
@@ -246,8 +357,12 @@ def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2):
 
     print(f"  [{polymer_model_name}] Precomputing 2D K_bind grid "
           f"(max NR = {max_N_receptor} per axis, {max_N_receptor**2} grid points)...")
-    K_bind_flat, grid_shape, _, rec_names_ordered = \
-        system.calculate_K_bind_vs_receptors(max_N_receptor)
+    if n_workers > 1:
+        K_bind_flat, grid_shape, _, rec_names_ordered = _parallel_calculate_k_bind(
+            max_N_receptor, rec_refs, polymer_model_name, n_workers)
+    else:
+        K_bind_flat, grid_shape, _, rec_names_ordered = \
+            system.calculate_K_bind_vs_receptors(max_N_receptor)
 
     M_conc = (A_cell / system.NP_excluded_area) * cell_conc
 
