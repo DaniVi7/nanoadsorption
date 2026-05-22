@@ -38,8 +38,11 @@ import os
 import copy
 import csv
 import itertools
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Annotated, List, Optional
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import typer
 from pathlib import Path
@@ -524,6 +527,67 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
             os.path.join(output_dir, "adsorption_polymer_models_2D_proj_nads.png"),
             results, n_models,
         )
+
+
+def _execute_run(run_spec: dict):
+    """Execute one scan_combinations run; designed for dispatch to a worker process.
+
+    Receives all required state via run_spec (picklable). Sets _sbpm globals from
+    run_spec so each worker process owns its own independent physics state.
+    Returns (run_name, None) on success or (None, skip_message) when > 2 axes.
+    """
+    _sbpm.R_NP                  = run_spec["R_NP"]
+    _sbpm.A_cell                = run_spec["A_cell"]
+    _sbpm.NP_conc               = run_spec["NP_conc"]
+    _sbpm.cell_conc             = run_spec["cell_conc"]
+    _sbpm.nonspec_interaction   = run_spec["nonspec_interaction"]
+    _sbpm.n_pts_1D              = run_spec["n_pts_1D"]
+    _sbpm.n_pts_2D              = run_spec["n_pts_2D"]
+    _sbpm.sigma_R_min           = run_spec["sigma_R_min"]
+    _sbpm.sigma_R_max           = run_spec["sigma_R_max"]
+    _sbpm.target_sigma_R        = run_spec["target_sigma_R"]
+    _sbpm.target_sigma_R_labels = run_spec["target_sigma_R_labels"]
+
+    data_polymers, receptor_map = _build_data_polymers_for_run(
+        list(run_spec["run_binder_ids"]),
+        run_spec["binders_data"],
+        run_spec["nanoparticle_params"],
+        run_spec["ligand_ratio"],
+    )
+    _sbpm.data_polymers = data_polymers
+
+    run_codependent = {
+        sec: (pri, ratio)
+        for sec, (pri, ratio) in run_spec["codependent_map"].items()
+        if sec in receptor_map and pri in receptor_map
+    }
+    _sbpm.codependent_receptors = run_codependent
+
+    secondary_receptors    = set(run_codependent.keys())
+    primary_receptor_names = [n for n in receptor_map if n not in secondary_receptors]
+    n_primary_axes         = len(primary_receptor_names)
+    run_name               = "+".join(run_spec["run_binder_ids"])
+
+    if n_primary_axes > 2:
+        return None, (f"SKIP  {run_name}: {n_primary_axes} independent receptor axes "
+                      f"({primary_receptor_names}). Use --codependent to reduce axes.")
+
+    run_output_dir = run_spec["run_output_dir"]
+    os.makedirs(run_output_dir, exist_ok=True)
+    print(f"=== {run_name}  |  receptors: {list(receptor_map)}  "
+          f"|  axes: {primary_receptor_names} ===", flush=True)
+
+    results = {}
+    for model_name in run_spec["models_to_run"]:
+        if n_primary_axes == 1:
+            results[model_name] = _sbpm.sweep_1axis(model_name, primary_receptor_names[0])
+        else:
+            results[model_name] = _sbpm.sweep_2axes(
+                model_name, primary_receptor_names[0], primary_receptor_names[1]
+            )
+
+    _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+    return run_name, None
 
 
 app = typer.Typer(
@@ -1103,6 +1167,11 @@ def scan_combinations_cmd(
         help="In a 2-binder run, fraction of sigma_L given to the first binder "
              "(second binder gets 1 - ratio). Default 0.5.",
     )] = 0.5,
+    n_workers: Annotated[int, typer.Option(
+        "--n-workers",
+        help="Number of parallel worker processes. Default 1 (serial). "
+             "Pass -1 to use all available CPU cores.",
+    )] = 1,
 ):
     """Receptor density sweeps for every single binder and pair of binders in a CSV.
 
@@ -1205,7 +1274,7 @@ def scan_combinations_cmd(
                 codependent_map[secondary] = (primary, float(ratio_str))
             typer.echo(f"Codependent receptors set: {codependent_map}")
 
-    # ── Step E: build run list and execute sweeps ─────────────────────────────
+    # ── Step E: build run list, filter skips, dispatch ───────────────────────
     single_binder_runs = [(binder_id,) for binder_id in binder_list]
     pair_runs          = list(itertools.combinations(binder_list, 2))
     all_runs           = single_binder_runs + pair_runs
@@ -1217,48 +1286,70 @@ def scan_combinations_cmd(
         else [_sbpm.polymer_models[0]]
     )
 
+    # Snapshot physics globals once; each worker receives them by value.
+    physics_snapshot = {
+        "R_NP":                  _sbpm.R_NP,
+        "A_cell":                _sbpm.A_cell,
+        "NP_conc":               _sbpm.NP_conc,
+        "cell_conc":             _sbpm.cell_conc,
+        "nonspec_interaction":   _sbpm.nonspec_interaction,
+        "n_pts_1D":              _sbpm.n_pts_1D,
+        "n_pts_2D":              _sbpm.n_pts_2D,
+        "sigma_R_min":           _sbpm.sigma_R_min,
+        "sigma_R_max":           _sbpm.sigma_R_max,
+        "target_sigma_R":        list(_sbpm.target_sigma_R),
+        "target_sigma_R_labels": list(_sbpm.target_sigma_R_labels),
+    }
+
+    # Pre-filter: skip runs with > 2 primary axes before dispatching.
+    run_specs = []
     for run_binder_ids in all_runs:
         run_name = "+".join(run_binder_ids)
-
-        data_polymers, receptor_map = _build_data_polymers_for_run(
+        _, receptor_map_check = _build_data_polymers_for_run(
             list(run_binder_ids), binders_data, nanoparticle_params, ligand_ratio
         )
-        _sbpm.data_polymers = data_polymers
-
-        # Keep only codependences whose secondary AND primary both appear in this run
-        run_codependent = {
-            secondary: (primary, ratio)
-            for secondary, (primary, ratio) in codependent_map.items()
-            if secondary in receptor_map and primary in receptor_map
+        run_codependent_check = {
+            sec: (pri, ratio)
+            for sec, (pri, ratio) in codependent_map.items()
+            if sec in receptor_map_check and pri in receptor_map_check
         }
-        _sbpm.codependent_receptors = run_codependent
-
-        secondary_receptors    = set(run_codependent.keys())
-        primary_receptor_names = [name for name in receptor_map if name not in secondary_receptors]
-        n_primary_axes         = len(primary_receptor_names)
-
-        if n_primary_axes > 2:
+        primary_check = [n for n in receptor_map_check if n not in run_codependent_check]
+        if len(primary_check) > 2:
             typer.echo(
-                f"SKIP  {run_name}: {n_primary_axes} independent receptor axes "
-                f"({primary_receptor_names}). Use --codependent to reduce axes."
+                f"SKIP  {run_name}: {len(primary_check)} independent receptor axes "
+                f"({primary_check}). Use --codependent to reduce axes."
             )
-            continue  # no output directory is created for skipped runs
+            continue
 
-        run_output_dir = os.path.join(output_dir, run_name)
-        os.makedirs(run_output_dir, exist_ok=True)
-        print(f"=== {run_name}  |  receptors: {list(receptor_map)}  "
-              f"|  axes: {primary_receptor_names} ===")
+        run_specs.append({
+            "run_binder_ids":    run_binder_ids,
+            "binders_data":      binders_data,
+            "nanoparticle_params": nanoparticle_params,
+            "ligand_ratio":      ligand_ratio,
+            "codependent_map":   codependent_map,
+            "run_output_dir":    str(os.path.join(str(output_dir), run_name)),
+            "models_to_run":     models_to_run,
+            **physics_snapshot,
+        })
 
-        results = {}
-        for model_name in models_to_run:
-            if n_primary_axes == 1:
-                results[model_name] = _sbpm.sweep_1axis(model_name, primary_receptor_names[0])
-            else:
-                results[model_name] = _sbpm.sweep_2axes(
-                    model_name, primary_receptor_names[0], primary_receptor_names[1]
-                )
+    actual_workers = os.cpu_count() if n_workers == -1 else n_workers
 
-        _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+    if actual_workers == 1:
+        for rs in run_specs:
+            run_name, skip_msg = _execute_run(rs)
+            if skip_msg:
+                typer.echo(skip_msg)
+    else:
+        print(f"Dispatching {len(run_specs)} runs across {actual_workers} workers.")
+        with ProcessPoolExecutor(max_workers=actual_workers) as pool:
+            futures = {pool.submit(_execute_run, rs): rs["run_binder_ids"]
+                       for rs in run_specs}
+            for future in as_completed(futures):
+                run_name, skip_msg = future.result()
+                if skip_msg:
+                    typer.echo(skip_msg)
+                else:
+                    typer.echo(f"Completed: {run_name}", err=False)
 
     print("\nAll runs complete.")
 

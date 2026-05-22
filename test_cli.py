@@ -1626,5 +1626,61 @@ class TestScanCombinations_CodepReduces2Recs_To1D(unittest.TestCase):
         self.assertFalse((self.out / "A" / "adsorption_2rec_gaussian.dat").exists())
 
 
+class TestScanCombinations_ParallelEquality(unittest.TestCase):
+    """n_workers=2 must produce bit-for-bit identical .dat output as n_workers=1."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        cls.tmp   = Path(tempfile.mkdtemp())
+        csv_content = "Target,lig1,lig2\nR1,150.0,300.0\n"
+        cls.csv_path = _write_temp_csv(cls.tmp, csv_content)
+        cls.out_serial   = cls.tmp / "serial"
+        cls.out_parallel = cls.tmp / "parallel"
+
+        cli.scan_combinations_cmd(
+            csv_path=cls.csv_path,
+            output_dir=cls.out_serial,
+            n_pts_1d=3,
+            compare=False,
+            polymer_model=["gaussian"],
+            n_workers=1,
+        )
+        _restore_sbpm_state(cls.saved)
+
+        saved2 = _save_sbpm_state()
+        cli.scan_combinations_cmd(
+            csv_path=cls.csv_path,
+            output_dir=cls.out_parallel,
+            n_pts_1d=3,
+            compare=False,
+            polymer_model=["gaussian"],
+            n_workers=2,
+        )
+        _restore_sbpm_state(saved2)
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _check_subdir(self, subdir):
+        s = _load_dat(self.out_serial   / subdir / "adsorption_gaussian.dat")
+        p = _load_dat(self.out_parallel / subdir / "adsorption_gaussian.dat")
+        np.testing.assert_array_almost_equal(
+            s, p, decimal=10,
+            err_msg=f"serial vs parallel mismatch in {subdir}/adsorption_gaussian.dat",
+        )
+
+    def test_lig1_identical(self):
+        self._check_subdir("lig1")
+
+    def test_lig2_identical(self):
+        self._check_subdir("lig2")
+
+    def test_pair_identical(self):
+        self._check_subdir("lig1+lig2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
