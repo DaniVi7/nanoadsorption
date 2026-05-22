@@ -237,7 +237,9 @@ class TestCLIMultiNpdosingVsOldScript(unittest.TestCase):
 # rounding is the same on both sides → rtol=1e-10 is valid there.
 
 class TestCLINpdosingFast(unittest.TestCase):
-    """scan-npdosing at reduced resolution: physical correctness and file format."""
+    """scan-npdosing at reduced resolution: physical correctness and file format.
+
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -300,6 +302,8 @@ class TestCLINpdosingFast(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from system_variables_invivo import receptor as _invivo_receptor
+        _invivo_receptor.pop("sigma_R", None)
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_dat_files_exist(self):
@@ -535,6 +539,8 @@ class TestCLIMultiNpdosingFast(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from system_variables_invivo_multi import receptor as _multi_receptor
+        _multi_receptor.pop("sigma_R", None)
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_dat_files_exist(self):
