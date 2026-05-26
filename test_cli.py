@@ -1465,7 +1465,8 @@ class TestScanCombinations_CodependentBadReceptorName(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_bad_secondary_raises(self):
-        with self.assertRaises(SystemExit):
+        import click
+        with self.assertRaises(click.exceptions.BadParameter):
             cli.scan_combinations_cmd(
                 csv_path=_write_temp_csv(self.tmp, self.csv_content),
                 output_dir=self.tmp / "out",
