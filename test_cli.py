@@ -644,9 +644,12 @@ class TestCLIBothModelsFast(unittest.TestCase):
             self.dat[:, 1], self.ref["bound_fraction"], rtol=1e-4, atol=1e-9
         )
 
-    def test_n_ads_matches_sweep(self):
+    def test_theta_matches_sweep(self):
+        _NP_excl     = (2.0 * _sbpm.R_NP) ** 2
+        _theta_scale = _sbpm.NP_conc * _NP_excl / (_sbpm.cell_conc * _sbpm.A_cell)
         np.testing.assert_allclose(
-            self.dat[:, 2], self.ref["n_ads"], rtol=1e-4, atol=1e-30
+            self.dat[:, 2], self.ref["bound_fraction"] * _theta_scale,
+            rtol=1e-4, atol=1e-30,
         )
 
     def test_bound_fraction_in_unit_interval(self):

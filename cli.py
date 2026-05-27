@@ -200,6 +200,7 @@ polymer_models:                # valid names: gaussian, Flory-exact, Flory-appro
 # If provided, target_sigma_R_labels must have the same length as target_sigma_R.
 target_sigma_R: []             # e.g. [100.0, 500.0]
 target_sigma_R_labels: []      # e.g. ["healthy tissue", "tumour"]
+target_sigma_R_axes: []        # per-line axis: '1' (x), '2' (y), or 'both' (default)
 """
 
 
@@ -343,6 +344,7 @@ def _load_system_vars_yaml(path: Path) -> dict:
     # sigma_R_min/max are in nm⁻² (internal units); convert / um2.
     sweep_target_sigma_R        = [float(x) for x in cfg.get("target_sigma_R", []) or []]
     sweep_target_sigma_R_labels = list(cfg.get("target_sigma_R_labels", []) or [])
+    sweep_target_sigma_R_axes   = list(cfg.get("target_sigma_R_axes",   []) or [])
     sweep_models                = list(cfg.get("polymer_models", ["gaussian", "Flory-exact"]) or [])
     sweep_n_pts_1D              = int(cfg.get("n_pts_1D", 50))
     sweep_n_pts_2D              = int(cfg.get("n_pts_2D", 20))
@@ -365,6 +367,7 @@ def _load_system_vars_yaml(path: Path) -> dict:
         "codependent_receptors": codep,
         "target_sigma_R":        sweep_target_sigma_R,
         "target_sigma_R_labels": sweep_target_sigma_R_labels,
+        "target_sigma_R_axes":   sweep_target_sigma_R_axes,
         "polymer_models":        sweep_models,
         "n_pts_1D":              sweep_n_pts_1D,
         "n_pts_2D":              sweep_n_pts_2D,
@@ -517,27 +520,37 @@ def _load_results(path: str) -> tuple:
     return results, primary_names
 
 
-def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
+def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
+                          target_axes=None):
     """Write .dat files and PNG plots for a completed receptor-density sweep.
 
     results      : {model_name: sweep_dict} returned by sweep_1axis or sweep_2axes
     output_dir   : directory where files are written (must already exist)
     primary_names: list of 1 or 2 receptor name strings (determines 1D vs 2D output paths)
+    target_axes  : list of '1', '2', or 'both' per entry in _sbpm.target_sigma_R;
+                   controls which receptor axis each reference line appears on in 2D plots.
+                   Ignored for 1D plots (single axis). Defaults to 'both' for any missing entry.
     """
     n_independent = len(primary_names)
     n_models      = len(results)
+
+    # theta = bound_fraction × NP_conc × (2·R_NP)² / (cell_conc · A_cell)
+    # Dimensionless fraction of cell surface physically occupied by adsorbed NPs.
+    # _sbpm.* module-level variables are patched by each CLI command before this function runs.
+    _NP_excl     = (2.0 * _sbpm.R_NP) ** 2                               # NP footprint [nm²]
+    _theta_scale = _sbpm.NP_conc * _NP_excl / (_sbpm.cell_conc * _sbpm.A_cell)  # dimensionless
 
     for model_name, res in results.items():
         safe_name = model_name.replace("-", "_")
         if n_independent == 1:
             fname = f"adsorption_{safe_name}.dat"
             with open(os.path.join(output_dir, fname), "w") as f:
-                f.write("# sigma_R(um^-2)  bound_fraction  n_ads(nm^-3)\n")
+                f.write("# sigma_R(um^-2)  bound_fraction  theta\n")
                 for j in range(len(res["sigma_R_um2"])):
                     f.write(
                         f"{res['sigma_R_um2'][j]:9.4e}  "
                         f"{res['bound_fraction'][j]:9.4e}  "
-                        f"{res['n_ads'][j]:9.4e}\n"
+                        f"{float(res['bound_fraction'][j]) * _theta_scale:9.4e}\n"
                     )
         else:
             fname = f"adsorption_2rec_{safe_name}.dat"
@@ -546,7 +559,7 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
             with open(os.path.join(output_dir, fname), "w") as f:
                 f.write(
                     f"# {res['rec_names'][0]}(um^-2)  {res['rec_names'][1]}(um^-2)  "
-                    f"bound_fraction  n_ads(nm^-3)\n"
+                    f"bound_fraction  theta\n"
                 )
                 for i in range(nr1):
                     for j in range(nr2):
@@ -554,16 +567,17 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
                             f"{res['sigma_R1_um2'][i]:9.4e}  "
                             f"{res['sigma_R2_um2'][j]:9.4e}  "
                             f"{res['bound_fraction'][i, j]:9.4e}  "
-                            f"{res['n_ads'][i, j]:9.4e}\n"
+                            f"{float(res['bound_fraction'][i, j]) * _theta_scale:9.4e}\n"
                         )
         print(f"Written {os.path.join(output_dir, fname)}")
 
     if n_independent == 1:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         for model_name, res in results.items():
+            theta_arr = res["bound_fraction"] * _theta_scale
             ax1.plot(res["sigma_R_um2"], res["bound_fraction"],
                      linestyle="solid", label=model_name)
-            ax2.plot(res["sigma_R_um2"], res["n_ads"],
+            ax2.plot(res["sigma_R_um2"], theta_arr,
                      linestyle="solid", label=model_name)
         for k, v in enumerate(_sbpm.target_sigma_R):
             lbl = _sbpm._ref_label(k, v)
@@ -571,11 +585,11 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
             ax2.axvline(x=v, color="gray", linestyle="dashed", linewidth=0.9, label=lbl)
         ax1.set_xscale("log")
         ax1.set_xlabel(_sbpm._axis_label(primary_names[0]))
-        ax1.set_ylabel("Adsorbed fraction")
+        ax1.set_ylabel("Fraction of adsorbed NPs")
         ax1.legend(fontsize="small")
-        ax2.set_xscale("log"); ax2.set_yscale("log")
+        ax2.set_xscale("log")
         ax2.set_xlabel(_sbpm._axis_label(primary_names[0]))
-        ax2.set_ylabel(r"Adsorbed NP concentration (nm$^{-3}$)")
+        ax2.set_ylabel("Fraction of occupied surface")
         ax2.legend(fontsize="small")
         plt.tight_layout()
         out_png = os.path.join(output_dir, "adsorption_polymer_models.png")
@@ -583,17 +597,40 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
         plt.close()
         print(f"Saved {out_png}")
     else:
+        # Split target_sigma_R by receptor axis for per-axis reference-line control.
+        # Entries without an axis tag (or with tag 'both') go to both axes.
+        def _axis_split(side):
+            axes     = target_axes or []
+            orig_sr  = _sbpm.target_sigma_R
+            orig_lbl = _sbpm.target_sigma_R_labels
+            keep = [i for i in range(len(orig_sr))
+                    if (axes[i] if i < len(axes) else "both") in (side, "both")]
+            return ([orig_sr[i]  for i in keep],
+                    [orig_lbl[i] for i in keep] if orig_lbl else [])
+
+        sr1, sr1_lbl = _axis_split("1")
+        sr2, sr2_lbl = _axis_split("2")
+
         _sbpm._plot_case_b(
-            "bound_fraction", "Adsorbed fraction",
+            "bound_fraction", "Fraction of adsorbed NPs",
             os.path.join(output_dir, "adsorption_polymer_models_3D.png"),
             os.path.join(output_dir, "adsorption_polymer_models_2D_proj.png"),
             results, n_models,
+            _sr1=sr1, _sr1_labels=sr1_lbl,
+            _sr2=sr2, _sr2_labels=sr2_lbl,
         )
+        # Inject theta under the "n_ads" key so _plot_case_b reads it unchanged.
+        results_theta = {
+            model: {**res, "n_ads": res["bound_fraction"] * _theta_scale}
+            for model, res in results.items()
+        }
         _sbpm._plot_case_b(
-            "n_ads", r"Adsorbed NP concentration (nm$^{-3}$)",
-            os.path.join(output_dir, "adsorption_polymer_models_3D_nads.png"),
-            os.path.join(output_dir, "adsorption_polymer_models_2D_proj_nads.png"),
-            results, n_models,
+            "n_ads", "Fraction of occupied surface",
+            os.path.join(output_dir, "adsorption_polymer_models_3D_theta.png"),
+            os.path.join(output_dir, "adsorption_polymer_models_2D_proj_theta.png"),
+            results_theta, n_models,
+            _sr1=sr1, _sr1_labels=sr1_lbl,
+            _sr2=sr2, _sr2_labels=sr2_lbl,
         )
 
 
@@ -615,6 +652,7 @@ def _execute_run(run_spec: dict):
     _sbpm.sigma_R_max           = run_spec["sigma_R_max"]
     _sbpm.target_sigma_R        = run_spec["target_sigma_R"]
     _sbpm.target_sigma_R_labels = run_spec["target_sigma_R_labels"]
+    _run_target_axes            = list(run_spec.get("target_sigma_R_axes", []))
 
     data_polymers, receptor_map = _build_data_polymers_for_run(
         list(run_spec["run_binder_ids"]),
@@ -648,7 +686,8 @@ def _execute_run(run_spec: dict):
     cache_path = os.path.join(run_output_dir, "run_results.npz")
     if run_spec.get("replot", False) and os.path.exists(cache_path):
         results, primary_receptor_names = _load_results(cache_path)
-        _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+        _write_and_plot_sweep(results, run_output_dir, primary_receptor_names,
+                              target_axes=_run_target_axes)
         print(f"  [cache] {run_name}", flush=True)
         return run_name, None
 
@@ -663,7 +702,8 @@ def _execute_run(run_spec: dict):
                 model_name, primary_receptor_names[0], primary_receptor_names[1],
                 n_workers=n_cores)
 
-    _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+    _write_and_plot_sweep(results, run_output_dir, primary_receptor_names,
+                          target_axes=_run_target_axes)
     _save_results(cache_path, results, primary_receptor_names)
     return run_name, None
 
@@ -1103,6 +1143,7 @@ def scan_both_polymer_models_cmd(
     os.makedirs(output_dir, exist_ok=True)
 
     # Step 1 — YAML (if provided): overrides all _sbpm module defaults
+    _target_axes: list = []
     if config is not None:
         _v = _load_system_vars_yaml(config)
         _sbpm.data_polymers           = _v["data_polymers"]
@@ -1114,6 +1155,7 @@ def scan_both_polymer_models_cmd(
         _sbpm.n_pts_2D                = _v["n_pts_2D"]
         _sbpm.sigma_R_min             = _v["sigma_R_min"]
         _sbpm.sigma_R_max             = _v["sigma_R_max"]
+        _target_axes                  = list(_v["target_sigma_R_axes"])
 
     # Step 2 — CLI overrides (only when argument was explicitly supplied)
     if n_pts_1d    is not None:  _sbpm.n_pts_1D               = n_pts_1d
@@ -1192,7 +1234,7 @@ def scan_both_polymer_models_cmd(
         _save_results(cache_path, results, primary_names)
 
     print("\nAll sweeps done.")
-    _write_and_plot_sweep(results, output_dir, primary_names)
+    _write_and_plot_sweep(results, output_dir, primary_names, target_axes=_target_axes)
     print("\nDone.")
 
 
@@ -1290,6 +1332,7 @@ def scan_combinations_cmd(
 
     # ── Step A: load NP parameters and keep _sbpm physics globals consistent ──
     yaml_codependent_map: dict = {}
+    _target_axes: list = []
     if config is not None:
         config_vars = _load_system_vars_yaml(config)
         yaml_codependent_map = config_vars["codependent_receptors"]
@@ -1309,6 +1352,7 @@ def scan_combinations_cmd(
         _sbpm.polymer_models         = config_vars["polymer_models"]
         _sbpm.target_sigma_R         = config_vars["target_sigma_R"]
         _sbpm.target_sigma_R_labels  = config_vars["target_sigma_R_labels"]
+        _target_axes                 = list(config_vars["target_sigma_R_axes"])
     else:
         from system_variables_invivo_multi import (
             R_NP, sigma_L, sigma_P2K, amono, akuhn,
@@ -1409,6 +1453,7 @@ def scan_combinations_cmd(
         "sigma_R_max":           _sbpm.sigma_R_max,
         "target_sigma_R":        list(_sbpm.target_sigma_R),
         "target_sigma_R_labels": list(_sbpm.target_sigma_R_labels),
+        "target_sigma_R_axes":   list(_target_axes),
     }
 
     # Pre-filter: skip runs with > 2 primary axes before dispatching.

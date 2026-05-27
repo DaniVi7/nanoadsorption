@@ -396,8 +396,25 @@ def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1)
 
 
 # ── Case B plotting helper ────────────────────────────────────────────────────
-def _plot_case_b(qty_key, qty_label, fname_3d, fname_2d, results, n_models):
-    """Generate 3D surface + 2D contour figures for one quantity (bound_fraction or n_ads)."""
+def _plot_case_b(qty_key, qty_label, fname_3d, fname_2d, results, n_models,
+                 _sr1=None, _sr1_labels=None, _sr2=None, _sr2_labels=None):
+    """Generate 3D surface + 2D contour figures for one quantity (bound_fraction or n_ads).
+
+    _sr1 / _sr1_labels : reference lines on x-axis (receptor 1, red).  Defaults to
+                         module-level target_sigma_R / target_sigma_R_labels.
+    _sr2 / _sr2_labels : reference lines on y-axis (receptor 2, blue). Defaults to
+                         module-level target_sigma_R / target_sigma_R_labels.
+    Passing empty lists suppresses lines on that axis without touching module globals.
+    """
+    _ref1     = list(target_sigma_R)        if _sr1        is None else list(_sr1)
+    _ref1_lbl = list(target_sigma_R_labels) if _sr1_labels is None else list(_sr1_labels)
+    _ref2     = list(target_sigma_R)        if _sr2        is None else list(_sr2)
+    _ref2_lbl = list(target_sigma_R_labels) if _sr2_labels is None else list(_sr2_labels)
+
+    def _lbl(refs, lbls, k, v, suffix):
+        return (lbls[k] if k < len(lbls) else
+                r"$\sigma_R = " + f"{v:.0f}" + r"\,\mu\mathrm{m}^{-2}$") + suffix
+
     # ── 3D surface ──
     fig3d = plt.figure(figsize=(8 * n_models, 7))
     for col, (model_name, res) in enumerate(results.items()):
@@ -413,21 +430,24 @@ def _plot_case_b(qty_key, qty_label, fname_3d, fname_2d, results, n_models):
         fig3d.colorbar(surf, ax=ax, shrink=0.5, pad=0.1, label=qty_label)
 
         log_smin, log_smax = log_s1[0], log_s1[-1]
-        for k, v in enumerate(target_sigma_R):
+        for k, v in enumerate(_ref1):
             log_v = np.log10(v)
             if log_smin <= log_v <= log_smax:
-                lbl1 = _ref_label(k, v, suffix=f" ({res['rec_names'][0]})")
-                lbl2 = _ref_label(k, v, suffix=f" ({res['rec_names'][1]})")
                 ax.plot([log_v, log_v], [log_smin, log_smax], [0.0, 0.0],
-                        color="red",  linestyle="--", linewidth=1.2, label=lbl1)
+                        color="red",  linestyle="--", linewidth=1.2,
+                        label=_lbl(_ref1, _ref1_lbl, k, v, f" ({res['rec_names'][0]})"))
+        for k, v in enumerate(_ref2):
+            log_v = np.log10(v)
+            if log_smin <= log_v <= log_smax:
                 ax.plot([log_smin, log_smax], [log_v, log_v], [0.0, 0.0],
-                        color="blue", linestyle="--", linewidth=1.2, label=lbl2)
+                        color="blue", linestyle="--", linewidth=1.2,
+                        label=_lbl(_ref2, _ref2_lbl, k, v, f" ({res['rec_names'][1]})"))
 
         ax.set_xlabel(_axis_label(res["rec_names"][0], log=True), labelpad=10)
         ax.set_ylabel(_axis_label(res["rec_names"][1], log=True), labelpad=10)
         ax.set_zlabel(qty_label)
         ax.set_title(model_name)
-        if target_sigma_R:
+        if _ref1 or _ref2:
             ax.legend(fontsize=7, loc="upper left")
 
     fig3d.tight_layout()
@@ -446,18 +466,19 @@ def _plot_case_b(qty_key, qty_label, fname_3d, fname_2d, results, n_models):
                          res[qty_key].T, levels=20, cmap="viridis")
         fig2d.colorbar(cf, ax=ax, label=qty_label)
 
-        for k, v in enumerate(target_sigma_R):
-            lbl1 = _ref_label(k, v, suffix=f" ({res['rec_names'][0]})")
-            lbl2 = _ref_label(k, v, suffix=f" ({res['rec_names'][1]})")
-            ax.axvline(x=v, color="red",  linestyle="--", linewidth=1.0, label=lbl1)
-            ax.axhline(y=v, color="blue", linestyle="--", linewidth=1.0, label=lbl2)
+        for k, v in enumerate(_ref1):
+            ax.axvline(x=v, color="red",  linestyle="--", linewidth=1.0,
+                       label=_lbl(_ref1, _ref1_lbl, k, v, f" ({res['rec_names'][0]})"))
+        for k, v in enumerate(_ref2):
+            ax.axhline(y=v, color="blue", linestyle="--", linewidth=1.0,
+                       label=_lbl(_ref2, _ref2_lbl, k, v, f" ({res['rec_names'][1]})"))
 
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel(_axis_label(res["rec_names"][0]))
         ax.set_ylabel(_axis_label(res["rec_names"][1]))
         ax.set_title(model_name)
-        if target_sigma_R:
+        if _ref1 or _ref2:
             ax.legend(fontsize=7)
 
     fig2d.tight_layout()
