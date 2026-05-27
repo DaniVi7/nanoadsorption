@@ -63,18 +63,22 @@ def _load_dat(path):
 
 def _save_cli_state():
     return {
-        "_npdosing_n_pts":     cli._npdosing_n_pts,
-        "_npdosing_sigma_min": cli._npdosing_sigma_min,
-        "_npdosing_sigma_max": cli._npdosing_sigma_max,
-        "_npdosing_factors":   list(cli._npdosing_factors),
-        "_langmuir_n_pts":     cli._langmuir_n_pts,
-        "_langmuir_sigma_min": cli._langmuir_sigma_min,
-        "_langmuir_sigma_max": cli._langmuir_sigma_max,
-        "_langmuir_factors":   list(cli._langmuir_factors),
-        "_multi_n_pts":        cli._multi_n_pts,
-        "_multi_sigma_min":    cli._multi_sigma_min,
-        "_multi_sigma_max":    cli._multi_sigma_max,
-        "_multi_factors":      list(cli._multi_factors),
+        "_npdosing_n_pts":        cli._npdosing_n_pts,
+        "_npdosing_sigma_min":    cli._npdosing_sigma_min,
+        "_npdosing_sigma_max":    cli._npdosing_sigma_max,
+        "_npdosing_factors":      list(cli._npdosing_factors),
+        "_langmuir_n_pts":        cli._langmuir_n_pts,
+        "_langmuir_sigma_min":    cli._langmuir_sigma_min,
+        "_langmuir_sigma_max":    cli._langmuir_sigma_max,
+        "_langmuir_factors":      list(cli._langmuir_factors),
+        "_multi_n_pts":           cli._multi_n_pts,
+        "_multi_sigma_min":       cli._multi_sigma_min,
+        "_multi_sigma_max":       cli._multi_sigma_max,
+        "_multi_factors":         list(cli._multi_factors),
+        "_dosing_n_pts":          cli._dosing_n_pts,
+        "_dosing_min_fac":        cli._dosing_min_fac,
+        "_dosing_max_fac":        cli._dosing_max_fac,
+        "_dosing_sigma_R_curves": list(cli._dosing_sigma_R_curves),
     }
 
 
@@ -2220,6 +2224,237 @@ class TestLangmuirSweepOptions(unittest.TestCase):
         finally:
             _restore_cli_state(s)
         self.assertTrue((self.tmp / "adsorption_scan_Npdosing.png").exists())
+
+
+def _make_invitro_yaml(tmp_dir: Path, extra: str = "") -> Path:
+    """Write a minimal valid invitro YAML and return its path.  extra is appended verbatim."""
+    from system_variables_invitro import (
+        R_NP, N_ligands, KD, A_SPR, NP_conc, V_SPR,
+        nonspec_interaction, binder_linear_size,
+    )
+    from units import nm, nM, mm2, mL as mL_unit
+    content = (
+        f"R_NP_nm: {float(R_NP / nm)!r}\n"
+        f"N_ligands: {int(N_ligands)}\n"
+        "PEG_monomer_size_nm: 0.28\n"
+        "PEG_kuhn_length_nm: 0.76\n"
+        "PEG_ligand_MW_g_per_mol: 3400.0\n"
+        "PEG_short_MW_g_per_mol: 2000.0\n"
+        "PEG_short_to_ligand_ratio: 11.4\n"
+        f"KD_nM: {float(KD / nM)!r}\n"
+        f"binder_linear_size_nm: {float(binder_linear_size / nm)!r}\n"
+        f"nonspec_interaction_kT: {float(nonspec_interaction)!r}\n"
+        "A_cell_um2: 100.0\n"
+        "cell_conc_per_mL: 1.875e+8\n"
+        "NP_conc_per_mL: 1.905e+12\n"
+        "VTzone_mL: 0.042\n"
+        f"A_SPR_mm2: {float(A_SPR / mm2)!r}\n"
+        f"V_SPR_mL: {float(V_SPR / mL_unit)!r}\n"
+        f"NP_conc_SPR_per_mL: {float(NP_conc * mL_unit)!r}\n"
+        "receptors:\n  - name: default\n"
+        "ligands:\n"
+        "  - name: PEG2K\n    type: inert\n"
+        "  - name: ligands\n    type: binding\n    receptor: default\n"
+        f"    KD_nM: {float(KD / nM)!r}\n"
+    )
+    content += extra
+    p = tmp_dir / "test_invitro.yaml"
+    p.write_text(content)
+    return p
+
+
+class TestDosingLangmuirOptions(unittest.TestCase):
+    """Fast tests for scan-dosing-langmuir flags (n_pts=3, single σ_R curve)."""
+
+    def setUp(self):
+        mp.dps = 50
+        self.tmp = Path(tempfile.mkdtemp())
+        from system_variables_invitro import receptor as _rec
+        _rec.pop("sigma_R", None)
+
+    def tearDown(self):
+        from system_variables_invitro import receptor as _rec
+        _rec.pop("sigma_R", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, **kwargs):
+        s = _save_cli_state()
+        cli._dosing_min_fac = 1e-3
+        cli._dosing_max_fac = 1.0
+        try:
+            cli.scan_dosing_langmuir(output_dir=self.tmp, **kwargs)
+        finally:
+            _restore_cli_state(s)
+
+    def test_n_pts_applied(self):
+        self._run(n_pts=4, sigma_r=[100.0])
+        dat = _load_dat(self.tmp / "adsorption_dosing_sigR100.dat")
+        self.assertEqual(dat.shape[0], 4)
+
+    def test_dosing_range(self):
+        self._run(dosing_min=0.01, dosing_max=1.0, n_pts=4, sigma_r=[100.0])
+        dat = _load_dat(self.tmp / "adsorption_dosing_sigR100.dat")
+        np_conc_col = dat[:, 0]
+        self.assertTrue(np.all(np.diff(np_conc_col) > 0), "NP_conc_per_mL must be monotonically increasing")
+
+    def test_sigma_r_curves(self):
+        self._run(sigma_r=[10.0, 100.0], n_pts=3)
+        self.assertTrue((self.tmp / "adsorption_dosing_sigR10.dat").exists())
+        self.assertTrue((self.tmp / "adsorption_dosing_sigR100.dat").exists())
+
+    def test_lennart_in_unit_interval(self):
+        self._run(sigma_r=[100.0], n_pts=3)
+        dat = _load_dat(self.tmp / "adsorption_dosing_sigR100.dat")
+        lf = dat[:, 1]
+        self.assertTrue(np.all(lf >= 0) and np.all(lf <= 1),
+                        f"Lennart fraction out of [0,1]: {lf}")
+
+    def test_coverage_in_unit_interval(self):
+        self._run(sigma_r=[100.0], n_pts=3)
+        dat = _load_dat(self.tmp / "adsorption_dosing_sigR100.dat")
+        cov = dat[:, 2]
+        self.assertTrue(np.all(cov >= 0) and np.all(cov <= 1),
+                        f"Coverage out of [0,1]: {cov}")
+
+    def test_replot_reproduces_dat(self):
+        self._run(sigma_r=[100.0], n_pts=3)
+        dat_path = self.tmp / "adsorption_dosing_sigR100.dat"
+        original = dat_path.read_text()
+        dat_path.unlink()
+        self._run(sigma_r=[100.0], n_pts=3, replot=True)
+        self.assertTrue(dat_path.exists())
+        self.assertEqual(dat_path.read_text(), original)
+
+    def test_yaml_log_range(self):
+        yaml_path = _make_invitro_yaml(
+            self.tmp,
+            "dosing_sigma_R_min: 10.0\n"
+            "dosing_sigma_R_max: 1000.0\n"
+            "dosing_sigma_R_n_pts: 3\n"
+            "dosing_sigma_R_scale: log\n",
+        )
+        s = _save_cli_state()
+        cli._dosing_min_fac = 1e-3
+        cli._dosing_max_fac = 1.0
+        try:
+            cli.scan_dosing_langmuir(output_dir=self.tmp, config=yaml_path, n_pts=3)
+        finally:
+            _restore_cli_state(s)
+        dats = list(self.tmp.glob("adsorption_dosing_sigR*.dat"))
+        self.assertEqual(len(dats), 3, f"Expected 3 .dat files, got {[d.name for d in dats]}")
+
+    def test_yaml_linear_range(self):
+        yaml_path = _make_invitro_yaml(
+            self.tmp,
+            "dosing_sigma_R_min: 100.0\n"
+            "dosing_sigma_R_max: 500.0\n"
+            "dosing_sigma_R_n_pts: 3\n"
+            "dosing_sigma_R_scale: linear\n",
+        )
+        s = _save_cli_state()
+        cli._dosing_min_fac = 1e-3
+        cli._dosing_max_fac = 1.0
+        try:
+            cli.scan_dosing_langmuir(output_dir=self.tmp, config=yaml_path, n_pts=3)
+        finally:
+            _restore_cli_state(s)
+        dats = list(self.tmp.glob("adsorption_dosing_sigR*.dat"))
+        self.assertEqual(len(dats), 3)
+
+    def test_explicit_list_overrides_range(self):
+        yaml_path = _make_invitro_yaml(
+            self.tmp,
+            "dosing_sigma_R_curves: [200.0]\n"
+            "dosing_sigma_R_min: 10.0\n"
+            "dosing_sigma_R_max: 1000.0\n"
+            "dosing_sigma_R_n_pts: 5\n",
+        )
+        s = _save_cli_state()
+        cli._dosing_min_fac = 1e-3
+        cli._dosing_max_fac = 1.0
+        try:
+            cli.scan_dosing_langmuir(output_dir=self.tmp, config=yaml_path, n_pts=3)
+        finally:
+            _restore_cli_state(s)
+        dats = list(self.tmp.glob("adsorption_dosing_sigR*.dat"))
+        self.assertEqual(len(dats), 1)
+        self.assertTrue((self.tmp / "adsorption_dosing_sigR200.dat").exists())
+
+
+class TestDosingCombinations(unittest.TestCase):
+    """Fast tests for scan-dosing-combinations (2-binder CSV, n_pts=3)."""
+
+    @classmethod
+    def setUpClass(cls):
+        mp.dps = 50
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.out = cls.tmp / "out"
+        csv_content = "Target,B001,B002\ndefault,100.0,200.0\n"
+        cls.csv_path = _write_temp_csv(cls.tmp, csv_content)
+        s = _save_cli_state()
+        cli._dosing_min_fac = 1e-3
+        cli._dosing_max_fac = 1.0
+        try:
+            cli.scan_dosing_combinations_cmd(
+                csv_path=cls.csv_path,
+                output_dir=cls.out,
+                config=None,
+                n_pts=3,
+                dosing_min=None, dosing_max=None,
+                polymer_model=None,
+                sigma_r=[100.0], sigma_r_label=None,
+                ligand_ratio=0.5, n_workers=1, job_range=None, replot=False,
+            )
+        finally:
+            _restore_cli_state(s)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_single_subdir_created(self):
+        self.assertTrue((self.out / "B001").is_dir())
+        self.assertTrue((self.out / "B002").is_dir())
+
+    def test_single_dat_written(self):
+        self.assertTrue(any((self.out / "B001").glob("adsorption_dosing_*.dat")))
+        self.assertTrue(any((self.out / "B002").glob("adsorption_dosing_*.dat")))
+
+    def test_pair_subdir_created(self):
+        self.assertTrue((self.out / "B001+B002").is_dir())
+
+    def test_png_written(self):
+        for subdir in ["B001", "B002", "B001+B002"]:
+            self.assertTrue(
+                (self.out / subdir / "adsorption_scan_dosing.png").exists(),
+                f"PNG missing in {subdir}",
+            )
+
+
+class TestGenerateTemplate(unittest.TestCase):
+    """Tests for generate-template --context flag."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_invitro_context_excludes_invivo_keys(self):
+        out = self.tmp / "invitro.yaml"
+        cli.generate_template(output=out, context="invitro")
+        content = out.read_text()
+        self.assertIn("A_SPR_mm2", content)
+        self.assertNotIn("VTzone_mL", content)
+        self.assertNotIn("N_lympho", content)
+
+    def test_invivo_context_excludes_invitro_keys(self):
+        out = self.tmp / "invivo.yaml"
+        cli.generate_template(output=out, context="invivo")
+        content = out.read_text()
+        self.assertIn("N_lympho", content)
+        self.assertNotIn("A_SPR_mm2", content)
+        self.assertNotIn("dosing_sigma_R_curves", content)
 
 
 if __name__ == "__main__":

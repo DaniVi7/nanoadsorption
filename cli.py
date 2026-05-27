@@ -13,7 +13,11 @@ scan-both-polymer-models : gaussian vs Flory-exact polymer model comparison
                            (parameters from system_variables_invivo_multi via _sbpm, or --config YAML)
 scan-combinations        : receptor density sweeps for every single binder and pair of binders
                            defined in a CSV binder×receptor KD matrix
+scan-dosing-langmuir     : NP dosing sweep for different σ_R values, in vitro SPR / Langmuir
+                           (Lennart fraction and surface coverage vs NP concentration)
+scan-dosing-combinations : dosing sweep for every single binder and pair from a KD CSV
 generate-template        : write a commented YAML parameter template to a file
+                           (--context invivo|invitro for focused context-specific templates)
 
 Usage
 -----
@@ -71,6 +75,11 @@ _multi_sigma_min    = 1.0 / um2
 _multi_sigma_max    = 2000 / um2
 _multi_factors      = [10**k for k in range(-5, 2)]
 
+_dosing_n_pts          = 200
+_dosing_min_fac        = 1e-5   # dimensionless NP_conc multiplier
+_dosing_max_fac        = 10.0
+_dosing_sigma_R_curves = [1.0, 10.0, 100.0, 500.0, 1000.0]  # µm⁻²
+
 
 # ── YAML template (written verbatim by generate-template) ────────────────────
 _YAML_TEMPLATE = """\
@@ -114,7 +123,7 @@ Vdosing_mL: 0.1                # Dosing volume per animal [mL]  (5 mL/kg × 0.02
 fTzone: 0.1                    # Fraction of dosed particles that reach the T zone
 VTzone_mL: 0.042               # Volume of spleen T zone [mL]
 
-# ── In-vitro / SPR target (scan-npdosing-langmuir) ────────────────────────────
+# ── In-vitro / SPR target (scan-npdosing-langmuir, scan-dosing-langmuir, scan-dosing-combinations)
 # NP_conc = Npdosing_SPR_per_mL;  cell_conc = 1/V_SPR  (single-chip geometry)
 A_SPR_mm2: 1.0                 # SPR chip area [mm²]
 V_SPR_mL: 6.0e-5               # Volume of solution above the SPR chip [mL]
@@ -203,6 +212,158 @@ target_sigma_R_labels: []      # e.g. ["healthy tissue", "tumour"]
 target_sigma_R_axes: []        # per-line axis: '1' (x), '2' (y), or 'both' (default)
 target_sigma_R_panels: []      # per-line panel set for langmuir: '1', '2', '3', or 'all' (default)
 npdosing_factors: []           # NP dosing multipliers for scan-npdosing-langmuir (default: 10^-5 … 10)
+
+# ── Dosing sweep (scan-dosing-langmuir, scan-dosing-combinations) ──────────────
+dosing_min_factor: 1.0e-5         # minimum NP dosing multiplier (dimensionless)
+dosing_max_factor: 10.0           # maximum NP dosing multiplier (dimensionless)
+dosing_n_pts: 200                 # grid points for the NP dosing axis
+
+# σ_R curve set — two mutually exclusive ways to specify; explicit list takes priority.
+# Option A — explicit list [µm⁻²]:
+dosing_sigma_R_curves: []         # e.g. [1.0, 10.0, 100.0, 500.0, 1000.0]
+# Option B — range spec (used when dosing_sigma_R_curves is empty):
+# dosing_sigma_R_min: 1.0         # lower bound [µm⁻²]
+# dosing_sigma_R_max: 1000.0      # upper bound [µm⁻²]
+# dosing_sigma_R_n_pts: 5         # number of curves
+# dosing_sigma_R_scale: log       # 'log' or 'linear'
+
+dosing_sigma_R_labels: []         # optional labels; same length as resolved curve set
+"""
+
+
+_YAML_TEMPLATE_INVIVO = """\
+# Nanoparticle adsorption parameter file — in-vivo context
+# Commands: scan-npdosing, scan-multi-npdosing, scan-both-polymer-models, scan-combinations
+
+# ── Nanoparticle geometry ──────────────────────────────────────────────────────
+R_NP_nm: 35.0           # Core NP radius [nm]
+N_ligands: 150          # Number of binding ligands grafted on the NP surface
+
+# ── PEG chain parameters ───────────────────────────────────────────────────────
+PEG_monomer_size_nm: 0.28         # Projected monomer length [nm]
+PEG_kuhn_length_nm: 0.76          # Kuhn segment length [nm]
+PEG_ligand_MW_g_per_mol: 3400.0   # MW of PEG tether carrying the binding ligand [g/mol]
+PEG_short_MW_g_per_mol: 2000.0    # MW of inert short PEG spacer chains [g/mol]
+PEG_short_to_ligand_ratio: 11.4   # sigma_PEG2K / sigma_ligands (inert-to-ligand grafting ratio)
+
+# ── Binding thermodynamics ─────────────────────────────────────────────────────
+KD_nM: 150.0                # Solution ligand–receptor dissociation constant [nM]
+binder_linear_size_nm: 3.5  # Linear size of the binding domain [nm]
+nonspec_interaction_kT: 0.0 # Nonspecific NP–cell interaction energy [kT]; 0 = none
+
+# ── In-vivo biological target ──────────────────────────────────────────────────
+# cell_conc = N_lympho × T_cell_fraction / V_spleen
+# NP_conc   = Npdosing_per_mL × Vdosing_mL × fTzone / VTzone_mL
+N_lympho: 7.5e7                # Lymphocytes in mouse spleen
+T_cell_fraction: 0.25          # Fraction of lymphocytes that are T cells
+V_spleen_mm3: 100.0            # Spleen volume [mm³]
+A_cell_um2: 100.0              # Target cell surface area [µm²]
+Npdosing_per_mL: 8.0e12        # NP concentration in dosing solution [NP/mL]
+Vdosing_mL: 0.1                # Dosing volume per animal [mL]
+fTzone: 0.1                    # Fraction of dosed particles that reach the T zone
+VTzone_mL: 0.042               # Volume of spleen T zone [mL]
+
+# ── Receptor definitions ───────────────────────────────────────────────────────
+receptors:
+  - name: default
+
+# ── Polymer / ligand configuration ────────────────────────────────────────────
+ligands:
+  - name: PEG2K
+    type: inert
+  - name: ligands
+    type: binding
+    receptor: default
+    # KD_nM: 150.0
+
+# ── Codependent receptor densities ────────────────────────────────────────────
+# codependent_receptors:
+#   - secondary: CD19
+#     primary:   CD44
+#     ratio:     0.5
+
+# ── Sweep configuration ────────────────────────────────────────────────────────
+sigma_R_min_per_um2: 1.0       # lower bound of σ_R sweep [µm⁻²]
+sigma_R_max_per_um2: 2000.0    # upper bound of σ_R sweep [µm⁻²]
+n_pts_1D: 50                   # grid points for 1D sweep
+n_pts_2D: 20                   # grid points per axis for 2D sweep
+
+polymer_models:
+  - gaussian
+  - Flory-exact
+
+target_sigma_R: []             # reference density markers [µm⁻²]
+target_sigma_R_labels: []      # labels for reference markers
+target_sigma_R_axes: []        # per-line axis: '1' (x), '2' (y), or 'both'
+"""
+
+_YAML_TEMPLATE_INVITRO = """\
+# Nanoparticle adsorption parameter file — in-vitro / SPR context
+# Commands: scan-npdosing-langmuir, scan-dosing-langmuir, scan-dosing-combinations
+
+# ── Nanoparticle geometry ──────────────────────────────────────────────────────
+R_NP_nm: 35.0           # Core NP radius [nm]
+N_ligands: 150          # Number of binding ligands grafted on the NP surface
+
+# ── PEG chain parameters ───────────────────────────────────────────────────────
+PEG_monomer_size_nm: 0.28         # Projected monomer length [nm]
+PEG_kuhn_length_nm: 0.76          # Kuhn segment length [nm]
+PEG_ligand_MW_g_per_mol: 3400.0   # MW of PEG tether carrying the binding ligand [g/mol]
+PEG_short_MW_g_per_mol: 2000.0    # MW of inert short PEG spacer chains [g/mol]
+PEG_short_to_ligand_ratio: 11.4   # sigma_PEG2K / sigma_ligands (inert-to-ligand grafting ratio)
+
+# ── Binding thermodynamics ─────────────────────────────────────────────────────
+KD_nM: 150.0                # Solution ligand–receptor dissociation constant [nM]
+binder_linear_size_nm: 3.5  # Linear size of the binding domain [nm]
+nonspec_interaction_kT: 0.0 # Nonspecific NP–cell interaction energy [kT]; 0 = none
+
+# ── In-vitro / SPR geometry ────────────────────────────────────────────────────
+# NP_conc = Npdosing_SPR_per_mL;  cell_conc = 1/V_SPR  (single-chip geometry)
+A_SPR_mm2: 1.0                 # SPR chip area [mm²]
+V_SPR_mL: 6.0e-5               # Volume of solution above the SPR chip [mL]
+Npdosing_SPR_per_mL: 4.0e11    # NP concentration in SPR solution [NP/mL]
+
+# ── Receptor definitions ───────────────────────────────────────────────────────
+receptors:
+  - name: default
+
+# ── Polymer / ligand configuration ────────────────────────────────────────────
+ligands:
+  - name: PEG2K
+    type: inert
+  - name: ligands
+    type: binding
+    receptor: default
+    # KD_nM: 150.0
+
+# ── Sweep configuration (scan-npdosing-langmuir) ──────────────────────────────
+sigma_R_min_per_um2: 1.0       # lower bound of σ_R sweep [µm⁻²]
+sigma_R_max_per_um2: 2000.0    # upper bound of σ_R sweep [µm⁻²]
+n_pts_1D: 50                   # grid points for σ_R axis
+
+polymer_models:
+  - Flory-exact
+
+target_sigma_R: []             # reference density markers [µm⁻²]
+target_sigma_R_labels: []      # labels for reference markers
+target_sigma_R_panels: []      # per-line panel: '1', '2', '3', or 'all'
+npdosing_factors: []           # NP dosing multipliers (default: 10^-5 … 10)
+
+# ── Dosing sweep (scan-dosing-langmuir, scan-dosing-combinations) ──────────────
+dosing_min_factor: 1.0e-5         # minimum NP dosing multiplier (dimensionless)
+dosing_max_factor: 10.0           # maximum NP dosing multiplier (dimensionless)
+dosing_n_pts: 200                 # grid points for the NP dosing axis
+
+# σ_R curve set — two mutually exclusive ways to specify; explicit list takes priority.
+# Option A — explicit list [µm⁻²]:
+dosing_sigma_R_curves: []         # e.g. [1.0, 10.0, 100.0, 500.0, 1000.0]
+# Option B — range spec (used when dosing_sigma_R_curves is empty):
+# dosing_sigma_R_min: 1.0         # lower bound [µm⁻²]
+# dosing_sigma_R_max: 1000.0      # upper bound [µm⁻²]
+# dosing_sigma_R_n_pts: 5         # number of curves
+# dosing_sigma_R_scale: log       # 'log' or 'linear'
+
+dosing_sigma_R_labels: []         # optional labels; same length as resolved curve set
 """
 
 
@@ -355,6 +516,29 @@ def _load_system_vars_yaml(path: Path) -> dict:
     sweep_sigma_R_min           = float(cfg.get("sigma_R_min_per_um2", 1.0   )) / um2
     sweep_sigma_R_max           = float(cfg.get("sigma_R_max_per_um2", 2000.0)) / um2
 
+    # Dosing sweep parameters (scan-dosing-langmuir, scan-dosing-combinations)
+    dosing_min_factor     = float(cfg.get("dosing_min_factor",  1e-5))
+    dosing_max_factor     = float(cfg.get("dosing_max_factor",  10.0))
+    dosing_n_pts          = int(cfg.get("dosing_n_pts",          200))
+    dosing_sigma_R_labels = list(cfg.get("dosing_sigma_R_labels", []) or [])
+
+    # σ_R curve set: explicit list takes priority; range spec used when list is absent/empty.
+    dosing_sigma_R_curves = [float(x) for x in cfg.get("dosing_sigma_R_curves", []) or []]
+    if not dosing_sigma_R_curves and (
+        "dosing_sigma_R_min" in cfg or "dosing_sigma_R_max" in cfg
+    ):
+        _sr_min   = float(cfg.get("dosing_sigma_R_min",   1.0))
+        _sr_max   = float(cfg.get("dosing_sigma_R_max", 1000.0))
+        _sr_npts  = int(cfg.get("dosing_sigma_R_n_pts",     5))
+        _sr_scale = str(cfg.get("dosing_sigma_R_scale",  "log"))
+        if _sr_scale == "log":
+            dosing_sigma_R_curves = list(
+                np.logspace(np.log10(_sr_min), np.log10(_sr_max), _sr_npts)
+            )
+        else:
+            dosing_sigma_R_curves = list(np.linspace(_sr_min, _sr_max, _sr_npts))
+    # If still empty, the calling command falls back to its module global _dosing_sigma_R_curves.
+
     return {
         "R_NP":                  R_NP,
         "data_polymers":         data_polymers,
@@ -387,6 +571,12 @@ def _load_system_vars_yaml(path: Path) -> dict:
         "NmonoL":     NmonoL,        # number of segments in ligand PEG chain
         "NmonoS":     NmonoS,        # number of segments in inert PEG chain
         "binder_size": binder_size,  # binder linear size [nm]
+        # Dosing sweep keys
+        "dosing_min_factor":     dosing_min_factor,
+        "dosing_max_factor":     dosing_max_factor,
+        "dosing_n_pts":          dosing_n_pts,
+        "dosing_sigma_R_curves": dosing_sigma_R_curves,
+        "dosing_sigma_R_labels": dosing_sigma_R_labels,
     }
 
 
@@ -1644,12 +1834,517 @@ def scan_combinations_cmd(
     print("\nAll runs complete.")
 
 
+@app.command("scan-dosing-langmuir")
+def scan_dosing_langmuir(
+    output_dir: Path = typer.Option(
+        Path("."), "-o", "--output-dir",
+        help="Output directory for data and plot files (created if absent).",
+    ),
+    config: Annotated[Optional[Path], typer.Option(
+        "--config", "-c",
+        help="YAML file with system parameters. If omitted, built-in invitro defaults are used.",
+    )] = None,
+    n_pts: Annotated[Optional[int], typer.Option(
+        "--n-pts",
+        help="Grid points for NP dosing axis (overrides YAML/module default).",
+    )] = None,
+    dosing_min: Annotated[Optional[float], typer.Option(
+        "--dosing-min",
+        help="Minimum NP dosing multiplier, dimensionless (overrides YAML/module default).",
+    )] = None,
+    dosing_max: Annotated[Optional[float], typer.Option(
+        "--dosing-max",
+        help="Maximum NP dosing multiplier, dimensionless (overrides YAML/module default).",
+    )] = None,
+    polymer_model: Annotated[Optional[str], typer.Option(
+        "--polymer-model",
+        help="Polymer model name (overrides YAML/module default).",
+    )] = None,
+    sigma_r: Annotated[Optional[List[float]], typer.Option(
+        "--sigma-r",
+        help="σ_R curve value [µm⁻²], repeatable. Defines the set of σ_R curves to plot. "
+             "Overrides YAML dosing_sigma_R_curves and range spec.",
+    )] = None,
+    sigma_r_label: Annotated[Optional[List[str]], typer.Option(
+        "--sigma-r-label",
+        help="Label for σ_R curve (same order as --sigma-r), repeatable.",
+    )] = None,
+    replot: Annotated[bool, typer.Option(
+        "--replot",
+        help="If run_results.npz already exists, load it and re-plot without recomputing.",
+    )] = False,
+):
+    """NP dosing sweep for different σ_R values — in vitro SPR experiment, Langmuir adsorption.
+
+    Physical context: SPR chip geometry (system_variables_invitro). Sweeps NP concentration
+    (x-axis) for a set of receptor surface densities (σ_R; one curve per value). Depletion
+    is disabled (infinite reservoir assumption). Receptor fluctuations are included via
+    Poisson averaging.
+
+    X-axis: NP concentration [NP mL⁻¹] (logarithmic).
+    Panel 1: Lennart fraction = n_ads / (V_SPR × NP_conc + n_ads) — fraction of all NPs
+             in the system (solution + surface) that ended up adsorbed.
+    Panel 2: Surface coverage = bound_fraction — fraction of SPR chip area occupied by NPs.
+
+    Output files
+    ------------
+    adsorption_dosing_{key}.dat  columns: NP_conc_per_mL  lennart_fraction  coverage
+    adsorption_scan_dosing.png   two panels: lennart_fraction and coverage vs NP_conc
+    run_results.npz              cache; reload with --replot to skip recomputation
+    """
+    mp.dps = 50
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── Parameter resolution: module globals → YAML → CLI overrides ──────────
+    n_sampling_points = _dosing_n_pts
+    dosing_min_fac    = _dosing_min_fac
+    dosing_max_fac    = _dosing_max_fac
+    _poly_model       = "Flory-exact"
+    sigma_R_curves    = list(_dosing_sigma_R_curves)  # µm⁻², non-empty default
+    _curve_labels: list = []
+
+    if config is not None:
+        _v = _load_system_vars_yaml(config)
+        R_NP                = _v["R_NP"]
+        data_polymers       = _v["data_polymers"]
+        receptor            = _v["receptor"]
+        A_SPR               = _v["A_SPR"]
+        NP_conc             = _v["NP_conc_spr"]
+        cell_conc           = _v["cell_conc_spr"]
+        nonspec_interaction = _v["nonspec_interaction"]
+        V_SPR               = _v["V_SPR"]
+        n_sampling_points   = _v["dosing_n_pts"]
+        dosing_min_fac      = _v["dosing_min_factor"]
+        dosing_max_fac      = _v["dosing_max_factor"]
+        if len(_v["polymer_models"]) == 1:    # only override when user set exactly one model
+            _poly_model     = _v["polymer_models"][0]
+        if _v["dosing_sigma_R_curves"]:       # empty list → keep module default
+            sigma_R_curves  = _v["dosing_sigma_R_curves"]
+        _curve_labels       = list(_v["dosing_sigma_R_labels"])
+    else:
+        from system_variables_invitro import (
+            R_NP, data_polymers, A_SPR, NP_conc, cell_conc,
+            nonspec_interaction, V_SPR, receptor,
+        )
+
+    if n_pts         is not None: n_sampling_points = n_pts
+    if dosing_min    is not None: dosing_min_fac    = dosing_min
+    if dosing_max    is not None: dosing_max_fac    = dosing_max
+    if polymer_model is not None: _poly_model       = polymer_model
+    if sigma_r:                   sigma_R_curves    = list(sigma_r)
+    if sigma_r_label:             _curve_labels     = list(sigma_r_label)
+
+    # ── Caching gate ─────────────────────────────────────────────────────────
+    cache_path   = os.path.join(str(output_dir), "run_results.npz")
+    sigma_R_keys = [f"sigR{v:g}" for v in sigma_R_curves]
+
+    if replot and os.path.exists(cache_path):
+        sigma_R_keys, results = _load_langmuir_results(cache_path)
+        print(f"[cache] loaded {cache_path} — re-plotting only.")
+    else:
+        results = _run_dosing_sweep(
+            R_NP=R_NP, A_SPR=A_SPR, NP_conc=NP_conc, cell_conc=cell_conc,
+            nonspec_interaction=nonspec_interaction, V_SPR=V_SPR,
+            data_polymers=data_polymers, receptor_registry={"_single": receptor},
+            n_pts=n_sampling_points, dosing_min_fac=dosing_min_fac,
+            dosing_max_fac=dosing_max_fac, poly_model=_poly_model,
+            sigma_R_curves=sigma_R_curves, sigma_R_keys=sigma_R_keys,
+        )
+        _save_langmuir_results(cache_path, sigma_R_keys, results)
+
+    # Write .dat files (both normal and --replot paths)
+    for key in sigma_R_keys:
+        res   = results[key]
+        fname = f"adsorption_dosing_{key}.dat"
+        with open(os.path.join(str(output_dir), fname), "w") as fh:
+            for j in range(len(res["NP_conc_per_mL"])):
+                fh.write(
+                    f"{res['NP_conc_per_mL'][j]:5.3e} "
+                    f"{res['lennart_fraction'][j]:5.3e} "
+                    f"{res['coverage'][j]:5.3e}\n"
+                )
+        print(f"  Written to {os.path.join(str(output_dir), fname)}")
+
+    # ── Plot ─────────────────────────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    for k_idx, key in enumerate(sigma_R_keys):
+        if k_idx < len(_curve_labels):
+            lbl = _curve_labels[k_idx]
+        else:
+            # key = "sigR100" → "100 µm⁻²"; safe for both compute and --replot paths
+            lbl = key.removeprefix("sigR") + " µm⁻²"
+        res = results[key]
+        ax1.plot(res["NP_conc_per_mL"], res["lennart_fraction"], label=lbl)
+        ax2.plot(res["NP_conc_per_mL"], res["coverage"],         label=lbl)
+
+    for ax in (ax1, ax2):
+        ax.set_xscale("log")
+        ax.set_xlabel(r"NP concentration (NP mL$^{-1}$)")
+        ax.legend()
+    ax1.set_ylabel("Fraction of bound NPs")
+    ax2.set_ylabel("Fraction of covered surface")
+    plt.tight_layout()
+    plot_path = os.path.join(str(output_dir), "adsorption_scan_dosing.png")
+    plt.savefig(plot_path)
+    plt.close()
+    print(f"\nPlot saved to {plot_path}")
+
+
+def _run_dosing_sweep(
+    R_NP, A_SPR, NP_conc, cell_conc, nonspec_interaction, V_SPR,
+    data_polymers, receptor_registry: dict,
+    n_pts: int, dosing_min_fac: float, dosing_max_fac: float,
+    poly_model: str, sigma_R_curves: list, sigma_R_keys: list,
+) -> dict:
+    """Execute the NP dosing sweep and return per-σ_R result arrays.
+
+    Outer loop: NP dosing values (log-spaced between dosing_min_fac × NP_conc and
+    dosing_max_fac × NP_conc). Inner loop: σ_R curve values.
+
+    K_bind_vs_NR is computed once (depends only on polymer model, not on σ_R or dosing).
+    bound_vs_receptor is computed once per dosing step (depends on NP_conc, not on σ_R).
+
+    Returns {key: {"NP_conc_per_mL": array, "lennart_fraction": array, "coverage": array}}
+    for each key in sigma_R_keys.
+    """
+    dosing_values = np.logspace(
+        np.log10(dosing_min_fac), np.log10(dosing_max_fac), n_pts
+    )
+
+    # Size the Poisson truncation for the highest σ_R value; floor at 20 for the
+    # sparse-receptor regime where calculate_bound_fraction requires at least 20 terms.
+    max_sigma_R_nm2 = max(sigma_R_curves) / um2
+    max_NR_ave      = int((2 * R_NP)**2 * max_sigma_R_nm2)
+    max_n_receptor  = max(max_NR_ave + 4 * (max_NR_ave + 1) + 1, 20)
+
+    system_ref = MultivalentBinding(
+        kT=kT, R_NP=R_NP, data_polymers=data_polymers,
+        binding_model="exact", polymer_model=poly_model,
+        A_cell=A_SPR, NP_conc=NP_conc, cell_conc=cell_conc,
+        nonspec_interaction=nonspec_interaction,
+    )
+
+    # slow step; depends only on polymer model, not on σ_R or dosing — done once
+    print(f"Computing K_bind for NR = 1..{max_n_receptor - 1} (slow step, done once)")
+    K_bind_vs_NR = system_ref.calculate_K_bind_vs_receptors(max_n_receptor)
+    print("K_bind computation done.")
+
+    acc = {k: {"NP_conc_per_mL": [], "lennart_fraction": [], "coverage": []}
+           for k in sigma_R_keys}
+    max_num_sites = A_SPR / system_ref.NP_excluded_area
+
+    for dosing_factor in dosing_values:
+        NP_conc_i = NP_conc * dosing_factor
+        # depends on NP_conc, not on σ_R — reused across all σ_R curves at this dosing step
+        bound_vs_receptor = system_ref.calculate_bound_vs_receptors_monodisperse(
+            max_n_receptor, depletion=False, verbose=False,
+            K_bind_vs_NR=K_bind_vs_NR, NP_conc=NP_conc_i,
+        )
+        for k_idx, sigma_R_val in enumerate(sigma_R_curves):
+            # calculate_bound_fraction reads σ_R from the shared receptor dict(s)
+            for rec in receptor_registry.values():
+                rec["sigma_R"] = sigma_R_val / um2
+            bf = float(system_ref.calculate_bound_fraction(
+                fluctuations=True, depletion=False,
+                bound_vs_receptor=bound_vs_receptor, max_factor=4,
+            ))
+            n_ads = bf * max_num_sites
+            # adsorbed / total: fraction of all NPs in the system that are surface-bound
+            lennart = n_ads / (V_SPR * NP_conc_i + n_ads)
+            acc[sigma_R_keys[k_idx]]["NP_conc_per_mL"].append(float(NP_conc_i * mL))
+            acc[sigma_R_keys[k_idx]]["lennart_fraction"].append(float(lennart))
+            acc[sigma_R_keys[k_idx]]["coverage"].append(float(bf))
+
+    # prevent σ_R residual from leaking into downstream calculations
+    for rec in receptor_registry.values():
+        rec.pop("sigma_R", None)
+
+    return {k: {kk: np.array(vv) for kk, vv in v.items()} for k, v in acc.items()}
+
+
+def _execute_dosing_run(run_spec: dict):
+    """Execute one scan-dosing-combinations run; designed for dispatch to a worker process.
+
+    Receives all required state via run_spec (picklable — no module globals are read).
+    Returns (run_name, None) on success or (run_name, error_message) on failure.
+    """
+    run_binder_ids  = list(run_spec["run_binder_ids"])
+    run_output_dir  = run_spec["run_output_dir"]
+    run_name        = "+".join(run_binder_ids)
+    os.makedirs(run_output_dir, exist_ok=True)
+    print(f"=== {run_name} ===", flush=True)
+
+    cache_path   = os.path.join(run_output_dir, "run_results.npz")
+    sigma_R_keys = [f"sigR{v:g}" for v in run_spec["sigma_R_curves"]]
+
+    if run_spec.get("replot", False) and os.path.exists(cache_path):
+        sigma_R_keys, results = _load_langmuir_results(cache_path)
+        print(f"  [cache] {run_name}", flush=True)
+    else:
+        data_polymers, receptor_registry = _build_data_polymers_for_run(
+            run_binder_ids,
+            run_spec["binders_data"],
+            run_spec["nanoparticle_params"],
+            run_spec["ligand_ratio"],
+        )
+        results = _run_dosing_sweep(
+            R_NP=run_spec["R_NP"],
+            A_SPR=run_spec["A_SPR"],
+            NP_conc=run_spec["NP_conc"],
+            cell_conc=run_spec["cell_conc"],
+            nonspec_interaction=run_spec["nonspec_interaction"],
+            V_SPR=run_spec["V_SPR"],
+            data_polymers=data_polymers,
+            receptor_registry=receptor_registry,
+            n_pts=run_spec["n_pts"],
+            dosing_min_fac=run_spec["dosing_min_fac"],
+            dosing_max_fac=run_spec["dosing_max_fac"],
+            poly_model=run_spec["poly_model"],
+            sigma_R_curves=run_spec["sigma_R_curves"],
+            sigma_R_keys=sigma_R_keys,
+        )
+        _save_langmuir_results(cache_path, sigma_R_keys, results)
+
+    curve_labels = run_spec.get("curve_labels", [])
+
+    # Write .dat files
+    for key in sigma_R_keys:
+        res   = results[key]
+        fname = f"adsorption_dosing_{key}.dat"
+        with open(os.path.join(run_output_dir, fname), "w") as fh:
+            for j in range(len(res["NP_conc_per_mL"])):
+                fh.write(
+                    f"{res['NP_conc_per_mL'][j]:5.3e} "
+                    f"{res['lennart_fraction'][j]:5.3e} "
+                    f"{res['coverage'][j]:5.3e}\n"
+                )
+
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    for k_idx, key in enumerate(sigma_R_keys):
+        lbl = curve_labels[k_idx] if k_idx < len(curve_labels) else key.removeprefix("sigR") + " µm⁻²"
+        res = results[key]
+        ax1.plot(res["NP_conc_per_mL"], res["lennart_fraction"], label=lbl)
+        ax2.plot(res["NP_conc_per_mL"], res["coverage"],         label=lbl)
+    for ax in (ax1, ax2):
+        ax.set_xscale("log")
+        ax.set_xlabel(r"NP concentration (NP mL$^{-1}$)")
+        ax.legend()
+    ax1.set_ylabel("Fraction of bound NPs")
+    ax2.set_ylabel("Fraction of covered surface")
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_output_dir, "adsorption_scan_dosing.png"))
+    plt.close()
+    print(f"  Done: {run_name}", flush=True)
+    return run_name, None
+
+
+@app.command("scan-dosing-combinations")
+def scan_dosing_combinations_cmd(
+    csv_path: Annotated[Path, typer.Option(
+        "--csv", "-f",
+        help="CSV with binder×receptor KD matrix [nM]. "
+             "Rows = receptors, columns = binder IDs. Empty cell = no binding.",
+    )],
+    output_dir: Path = typer.Option(
+        Path("."), "-o", "--output-dir",
+        help="Root output directory. Each run writes to its own subdirectory.",
+    ),
+    config: Annotated[Optional[Path], typer.Option(
+        "--config", "-c",
+        help="YAML parameter file (NP geometry, PEG, SPR geometry, dosing). "
+             "If omitted, system_variables_invitro defaults are used.",
+    )] = None,
+    n_pts: Annotated[Optional[int], typer.Option(
+        "--n-pts",
+        help="Grid points for NP dosing axis (overrides YAML/module default).",
+    )] = None,
+    dosing_min: Annotated[Optional[float], typer.Option(
+        "--dosing-min",
+        help="Minimum NP dosing multiplier (overrides YAML/module default).",
+    )] = None,
+    dosing_max: Annotated[Optional[float], typer.Option(
+        "--dosing-max",
+        help="Maximum NP dosing multiplier (overrides YAML/module default).",
+    )] = None,
+    polymer_model: Annotated[Optional[str], typer.Option(
+        "--polymer-model",
+        help="Polymer model name (overrides YAML/module default).",
+    )] = None,
+    sigma_r: Annotated[Optional[List[float]], typer.Option(
+        "--sigma-r",
+        help="σ_R curve value [µm⁻²], repeatable. Overrides YAML/module default.",
+    )] = None,
+    sigma_r_label: Annotated[Optional[List[str]], typer.Option(
+        "--sigma-r-label",
+        help="Label for σ_R curve (same order as --sigma-r), repeatable.",
+    )] = None,
+    ligand_ratio: Annotated[float, typer.Option(
+        "--ligand-ratio",
+        help="In a 2-binder run, fraction of sigma_L given to the first binder "
+             "(second binder gets 1 - ratio). Default 0.5.",
+    )] = 0.5,
+    n_workers: Annotated[int, typer.Option(
+        "--n-workers",
+        help="Number of parallel worker processes. Default 1 (serial). "
+             "Pass -1 to use all available CPU cores.",
+    )] = 1,
+    job_range: Annotated[Optional[str], typer.Option(
+        "--job-range",
+        help='1-indexed inclusive range "START:END" of runs to execute. '
+             'Allows splitting a batch across HPC nodes. '
+             'Example: --job-range 1:4 runs the first 4 runs.',
+    )] = None,
+    replot: Annotated[bool, typer.Option(
+        "--replot",
+        help="If run_results.npz already exists for a run, load it and re-plot "
+             "without recomputing. Default: always recompute.",
+    )] = False,
+):
+    """NP dosing sweeps for every single binder and pair of binders in a CSV — SPR Langmuir.
+
+    Reads a binder×receptor KD matrix from a CSV file and runs scan-dosing-langmuir-style
+    sweeps for every single binder and every unordered pair of binders. Results are written
+    to one subdirectory per run under --output-dir.
+
+    Physical context: identical to scan-dosing-langmuir (SPR geometry, depletion=False,
+    Poisson receptor fluctuations). For pairs with multiple receptor types, all receptor
+    densities are set to the same σ_R value at each curve point (isotropic approximation).
+
+    Output files per run
+    --------------------
+    adsorption_dosing_{key}.dat  columns: NP_conc_per_mL  lennart_fraction  coverage
+    adsorption_scan_dosing.png   two panels: lennart_fraction and coverage vs NP_conc
+    run_results.npz              cache; reload with --replot to skip recomputation
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── Parameter resolution: module globals → YAML → CLI overrides ──────────
+    n_sampling_points = _dosing_n_pts
+    dosing_min_fac    = _dosing_min_fac
+    dosing_max_fac    = _dosing_max_fac
+    _poly_model       = "Flory-exact"
+    sigma_R_curves    = list(_dosing_sigma_R_curves)
+    _curve_labels: list = []
+
+    if config is not None:
+        _v = _load_system_vars_yaml(config)
+        R_NP                = _v["R_NP"]
+        A_SPR               = _v["A_SPR"]
+        NP_conc             = _v["NP_conc_spr"]
+        cell_conc           = _v["cell_conc_spr"]
+        nonspec_interaction = _v["nonspec_interaction"]
+        V_SPR               = _v["V_SPR"]
+        n_sampling_points   = _v["dosing_n_pts"]
+        dosing_min_fac      = _v["dosing_min_factor"]
+        dosing_max_fac      = _v["dosing_max_factor"]
+        if len(_v["polymer_models"]) == 1:
+            _poly_model     = _v["polymer_models"][0]
+        if _v["dosing_sigma_R_curves"]:
+            sigma_R_curves  = _v["dosing_sigma_R_curves"]
+        _curve_labels       = list(_v["dosing_sigma_R_labels"])
+        nanoparticle_params = _v  # has sigma_L, amono, akuhn, NmonoL, NmonoS, binder_size
+    else:
+        from system_variables_invitro import (
+            R_NP, sigma_L, sigma_P2K, amono, akuhn,
+            NmonoLigands, NmonoShort, binder_linear_size,
+            A_SPR, NP_conc, cell_conc, nonspec_interaction, V_SPR,
+        )
+        nanoparticle_params = {
+            "R_NP": R_NP, "sigma_L": sigma_L, "sigma_P2K": sigma_P2K,
+            "amono": amono, "akuhn": akuhn, "NmonoL": NmonoLigands,
+            "NmonoS": NmonoShort, "binder_size": binder_linear_size,
+        }
+
+    if n_pts         is not None: n_sampling_points = n_pts
+    if dosing_min    is not None: dosing_min_fac    = dosing_min
+    if dosing_max    is not None: dosing_max_fac    = dosing_max
+    if polymer_model is not None: _poly_model       = polymer_model
+    if sigma_r:                   sigma_R_curves    = list(sigma_r)
+    if sigma_r_label:             _curve_labels     = list(sigma_r_label)
+
+    # ── Build run list ────────────────────────────────────────────────────────
+    binders_data = _read_binders_csv(csv_path)
+    binder_list  = sorted(binders_data.keys())
+    single_runs  = [(bid,)          for bid in binder_list]
+    pair_runs    = list(itertools.combinations(binder_list, 2))
+    all_runs     = single_runs + pair_runs
+    print(f"Loaded {len(binders_data)} binders → {len(all_runs)} runs "
+          f"({len(single_runs)} single, {len(pair_runs)} pairs)")
+
+    if job_range is not None:
+        try:
+            start_str, end_str = job_range.split(":")
+            start_idx = int(start_str) - 1
+            end_idx   = int(end_str)
+        except ValueError:
+            raise typer.BadParameter(
+                f"Invalid --job-range '{job_range}'. Expected format: START:END (e.g. 1:4).",
+                param_hint="--job-range",
+            )
+        all_runs = all_runs[start_idx:end_idx]
+        print(f"  job-range {job_range}: executing {len(all_runs)} runs")
+
+    if n_workers == -1:
+        import multiprocessing
+        n_workers = multiprocessing.cpu_count()
+
+    # Build run specs
+    run_specs = []
+    for binder_ids in all_runs:
+        run_name       = "+".join(binder_ids)
+        run_output_dir = os.path.join(str(output_dir), run_name)
+        run_specs.append({
+            "R_NP": R_NP, "A_SPR": A_SPR, "NP_conc": NP_conc,
+            "cell_conc": cell_conc, "nonspec_interaction": nonspec_interaction,
+            "V_SPR": V_SPR,
+            "n_pts": n_sampling_points,
+            "dosing_min_fac": dosing_min_fac, "dosing_max_fac": dosing_max_fac,
+            "poly_model": _poly_model,
+            "sigma_R_curves": sigma_R_curves,
+            "curve_labels": _curve_labels,
+            "run_binder_ids": list(binder_ids),
+            "binders_data": binders_data,
+            "nanoparticle_params": nanoparticle_params,
+            "ligand_ratio": ligand_ratio,
+            "run_output_dir": run_output_dir,
+            "replot": replot,
+        })
+
+    # ── Dispatch ──────────────────────────────────────────────────────────────
+    if n_workers == 1:
+        for spec in run_specs:
+            run_name, err = _execute_dosing_run(spec)
+            if err:
+                typer.echo(err)
+            else:
+                typer.echo(f"Completed: {run_name}", err=False)
+    else:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_execute_dosing_run, spec): spec for spec in run_specs}
+            for future in as_completed(futures):
+                run_name, err = future.result()
+                if err:
+                    typer.echo(err)
+                else:
+                    typer.echo(f"Completed: {run_name}", err=False)
+
+    print("\nAll runs complete.")
+
+
 @app.command("generate-template")
 def generate_template(
     output: Path = typer.Option(
         Path("system_params.yaml"), "--output", "-o",
         help="Path for the output YAML template file.",
     ),
+    context: Annotated[Optional[str], typer.Option(
+        "--context",
+        help="Parameter context: 'invivo' or 'invitro'. "
+             "invivo: scan-npdosing / scan-combinations fields only. "
+             "invitro: SPR / dosing sweep fields only. "
+             "Omit for a combined template with all fields.",
+    )] = None,
 ):
     """Write a commented YAML parameter template to a file.
 
@@ -1660,13 +2355,24 @@ def generate_template(
 
     Example
     -------
-      nanoads generate-template --output my_params.yaml
-      # edit my_params.yaml …
-      nanoads scan-npdosing --config my_params.yaml --output-dir results/
+      nanoads generate-template --context invitro --output spr_params.yaml
+      # edit spr_params.yaml …
+      nanoads scan-dosing-langmuir --config spr_params.yaml --output-dir results/
     """
+    if context == "invivo":
+        template = _YAML_TEMPLATE_INVIVO
+    elif context == "invitro":
+        template = _YAML_TEMPLATE_INVITRO
+    elif context is None:
+        template = _YAML_TEMPLATE
+    else:
+        raise typer.BadParameter(
+            f"Unknown context '{context}'. Use 'invivo' or 'invitro'.",
+            param_hint="--context",
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w") as f:
-        f.write(_YAML_TEMPLATE)
+        f.write(template)
     print(f"Template written to {output}")
     print(f"Edit the file and run: nanoads <command> --config {output}")
 
