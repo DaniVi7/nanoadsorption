@@ -999,6 +999,9 @@ class TestYamlVsPythonLangmuir(unittest.TestCase):
             "ligands:\n  - name: PEG2K\n    type: inert\n"
             "  - name: ligands\n    type: binding\n    receptor: default\n"
             f"    KD_nM: {repr(float(KD / nM))}\n"
+            f"n_pts_1D: {_N_PTS}\n"
+            "sigma_R_min_per_um2: 10.0\n"
+            "sigma_R_max_per_um2: 200.0\n"
         )
         cls.tmp_dir = Path(tempfile.mkdtemp())
         yaml_path = cls.tmp_dir / "invitro_exact.yaml"
@@ -2119,6 +2122,104 @@ class TestScanBothModels_SkipExisting(unittest.TestCase):
             _restore_sbpm_state(saved2)
         self.assertTrue(dat_path.exists())
         self.assertEqual(dat_path.read_text(), original)
+
+
+class TestLangmuirSweepOptions(unittest.TestCase):
+    """Fast tests for the new scan-npdosing-langmuir flags (n_pts=3, 1-2 factors)."""
+
+    def setUp(self):
+        mp.dps = 50
+        self.tmp = Path(tempfile.mkdtemp())
+        from system_variables_invitro import receptor as _rec
+        _rec.pop("sigma_R", None)
+
+    def tearDown(self):
+        from system_variables_invitro import receptor as _rec
+        _rec.pop("sigma_R", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, **kwargs):
+        s = _save_cli_state()
+        cli._langmuir_sigma_min = _SMIN
+        cli._langmuir_sigma_max = _SMAX
+        try:
+            cli.scan_npdosing_langmuir(output_dir=self.tmp, **kwargs)
+        finally:
+            _restore_cli_state(s)
+
+    def test_n_pts_applied(self):
+        self._run(n_pts=5, npdosing_factor=[1.0])
+        dat = _load_dat(self.tmp / "adsorption_Npdosing_x1.dat")
+        self.assertEqual(dat.shape[0], 5)
+
+    def test_sigma_r_range(self):
+        self._run(sigma_r_min=10.0, sigma_r_max=100.0, n_pts=5, npdosing_factor=[1.0])
+        dat = _load_dat(self.tmp / "adsorption_Npdosing_x1.dat")
+        self.assertAlmostEqual(dat[0, 0],  10.0, places=1)
+        self.assertAlmostEqual(dat[-1, 0], 100.0, places=1)
+
+    def test_polymer_model_gaussian(self):
+        self._run(polymer_model="gaussian", n_pts=3, npdosing_factor=[1.0])
+        self.assertTrue((self.tmp / "adsorption_Npdosing_x1.dat").exists())
+
+    def test_npdosing_factors(self):
+        self._run(npdosing_factor=[0.1, 1.0], n_pts=3)
+        self.assertTrue((self.tmp / "adsorption_Npdosing_x0.1.dat").exists())
+        self.assertTrue((self.tmp / "adsorption_Npdosing_x1.dat").exists())
+
+    def test_replot_reproduces_dat(self):
+        self._run(npdosing_factor=[1.0], n_pts=3)
+        dat_path = self.tmp / "adsorption_Npdosing_x1.dat"
+        original = dat_path.read_text()
+        dat_path.unlink()
+        self._run(npdosing_factor=[1.0], n_pts=3, replot=True)
+        self.assertTrue(dat_path.exists())
+        self.assertEqual(dat_path.read_text(), original)
+
+    def test_target_panels_panel1_only(self):
+        from system_variables_invitro import (
+            R_NP, N_ligands, KD, A_SPR, NP_conc, V_SPR,
+            nonspec_interaction, binder_linear_size,
+        )
+        from units import nm, nM, mm2, mL
+        yaml_content = (
+            f"R_NP_nm: {float(R_NP / nm)!r}\n"
+            f"N_ligands: {int(N_ligands)}\n"
+            "PEG_monomer_size_nm: 0.28\n"
+            "PEG_kuhn_length_nm: 0.76\n"
+            "PEG_ligand_MW_g_per_mol: 3400.0\n"
+            "PEG_short_MW_g_per_mol: 2000.0\n"
+            "PEG_short_to_ligand_ratio: 11.4\n"
+            f"KD_nM: {float(KD / nM)!r}\n"
+            f"binder_linear_size_nm: {float(binder_linear_size / nm)!r}\n"
+            f"nonspec_interaction_kT: {float(nonspec_interaction)!r}\n"
+            "A_cell_um2: 100.0\n"
+            "cell_conc_per_mL: 1.875e+8\n"
+            "NP_conc_per_mL: 1.905e+12\n"
+            "VTzone_mL: 0.042\n"
+            f"A_SPR_mm2: {float(A_SPR / mm2)!r}\n"
+            f"V_SPR_mL: {float(V_SPR / mL)!r}\n"
+            f"NP_conc_SPR_per_mL: {float(NP_conc * mL)!r}\n"
+            "receptors:\n  - name: default\n"
+            "ligands:\n"
+            "  - name: PEG2K\n    type: inert\n"
+            "  - name: ligands\n    type: binding\n    receptor: default\n"
+            f"    KD_nM: {float(KD / nM)!r}\n"
+            "target_sigma_R: [10.0]\n"
+            "target_sigma_R_panels:\n  - '1'\n"
+            "npdosing_factors: [1.0]\n"
+            "n_pts_1D: 3\n"
+        )
+        yaml_path = self.tmp / "test_panels.yaml"
+        yaml_path.write_text(yaml_content)
+        s = _save_cli_state()
+        cli._langmuir_sigma_min = _SMIN
+        cli._langmuir_sigma_max = _SMAX
+        try:
+            cli.scan_npdosing_langmuir(output_dir=self.tmp, config=yaml_path)
+        finally:
+            _restore_cli_state(s)
+        self.assertTrue((self.tmp / "adsorption_scan_Npdosing.png").exists())
 
 
 if __name__ == "__main__":

@@ -201,6 +201,8 @@ polymer_models:                # valid names: gaussian, Flory-exact, Flory-appro
 target_sigma_R: []             # e.g. [100.0, 500.0]
 target_sigma_R_labels: []      # e.g. ["healthy tissue", "tumour"]
 target_sigma_R_axes: []        # per-line axis: '1' (x), '2' (y), or 'both' (default)
+target_sigma_R_panels: []      # per-line panel set for langmuir: '1', '2', '3', or 'all' (default)
+npdosing_factors: []           # NP dosing multipliers for scan-npdosing-langmuir (default: 10^-5 … 10)
 """
 
 
@@ -345,6 +347,8 @@ def _load_system_vars_yaml(path: Path) -> dict:
     sweep_target_sigma_R        = [float(x) for x in cfg.get("target_sigma_R", []) or []]
     sweep_target_sigma_R_labels = list(cfg.get("target_sigma_R_labels", []) or [])
     sweep_target_sigma_R_axes   = list(cfg.get("target_sigma_R_axes",   []) or [])
+    sweep_target_sigma_R_panels = list(cfg.get("target_sigma_R_panels", []) or [])
+    sweep_npdosing_factors      = list(cfg.get("npdosing_factors",      []) or [])
     sweep_models                = list(cfg.get("polymer_models", ["gaussian", "Flory-exact"]) or [])
     sweep_n_pts_1D              = int(cfg.get("n_pts_1D", 50))
     sweep_n_pts_2D              = int(cfg.get("n_pts_2D", 20))
@@ -368,6 +372,8 @@ def _load_system_vars_yaml(path: Path) -> dict:
         "target_sigma_R":        sweep_target_sigma_R,
         "target_sigma_R_labels": sweep_target_sigma_R_labels,
         "target_sigma_R_axes":   sweep_target_sigma_R_axes,
+        "target_sigma_R_panels": sweep_target_sigma_R_panels,
+        "npdosing_factors":      sweep_npdosing_factors,
         "polymer_models":        sweep_models,
         "n_pts_1D":              sweep_n_pts_1D,
         "n_pts_2D":              sweep_n_pts_2D,
@@ -518,6 +524,27 @@ def _load_results(path: str) -> tuple:
             res[subkey] = val.tolist() if subkey == "rec_names" else val
         results[model] = res
     return results, primary_names
+
+
+def _save_langmuir_results(path: str, factor_keys: list, results: dict) -> None:
+    """Persist langmuir sweep results preserving insertion order of factor keys."""
+    arrays = {"_factor_keys": np.array(factor_keys, dtype=object)}
+    for fkey, res in results.items():
+        for k, v in res.items():
+            arrays[f"{fkey}__{k}"] = np.asarray(v)
+    np.savez_compressed(path, **arrays)
+
+
+def _load_langmuir_results(path: str) -> tuple:
+    """Load langmuir sweep results from .npz, restoring insertion order."""
+    data        = np.load(path, allow_pickle=True)
+    factor_keys = data["_factor_keys"].tolist()
+    results     = {}
+    for fkey in factor_keys:
+        prefix = f"{fkey}__"
+        results[fkey] = {k[len(prefix):]: data[k]
+                         for k in data.files if k.startswith(prefix)}
+    return factor_keys, results
 
 
 def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
@@ -839,6 +866,38 @@ def scan_npdosing_langmuir(
         "--config", "-c",
         help="YAML file with system parameters. If omitted, built-in defaults are used.",
     )] = None,
+    n_pts: Annotated[Optional[int], typer.Option(
+        "--n-pts",
+        help="Grid points for receptor density sweep (overrides YAML/module default).",
+    )] = None,
+    sigma_r_min: Annotated[Optional[float], typer.Option(
+        "--sigma-r-min",
+        help="Sweep lower bound [µm⁻²] (overrides YAML/module default).",
+    )] = None,
+    sigma_r_max: Annotated[Optional[float], typer.Option(
+        "--sigma-r-max",
+        help="Sweep upper bound [µm⁻²] (overrides YAML/module default).",
+    )] = None,
+    polymer_model: Annotated[Optional[str], typer.Option(
+        "--polymer-model",
+        help="Polymer model name (overrides YAML/module default).",
+    )] = None,
+    npdosing_factor: Annotated[Optional[List[float]], typer.Option(
+        "--npdosing-factor",
+        help="NP dosing multiplier, repeatable (overrides YAML/module default).",
+    )] = None,
+    target_sigma_r: Annotated[Optional[List[float]], typer.Option(
+        "--target-sigma-r",
+        help="Reference density marker [µm⁻²], repeatable.",
+    )] = None,
+    target_label: Annotated[Optional[List[str]], typer.Option(
+        "--target-label",
+        help="Label for reference marker (same order as --target-sigma-r), repeatable.",
+    )] = None,
+    replot: Annotated[bool, typer.Option(
+        "--replot",
+        help="If run_results.npz already exists, load it and re-plot without recomputing.",
+    )] = False,
 ):
     """Bound fraction vs receptor density — in vitro SPR experiment, Langmuir adsorption.
 
@@ -852,9 +911,21 @@ def scan_npdosing_langmuir(
     ------------
     adsorption_Npdosing_x{factor}.dat — columns: sigma_R [um^-2]  bound_fraction  n_ads  langmuir_fraction
     adsorption_scan_Npdosing.png      — three panels: bound_fraction, n_ads, langmuir_fraction
+    run_results.npz                   — cache; reload with --replot to skip recomputation
     """
     mp.dps = 50
     os.makedirs(output_dir, exist_ok=True)
+
+    # Defaults from module globals
+    n_sampling_points = _langmuir_n_pts
+    sigma_R_min       = _langmuir_sigma_min
+    sigma_R_max       = _langmuir_sigma_max
+    _poly_model       = "Flory-exact"
+    factors           = list(_langmuir_factors)
+    _target_sr:     list = []
+    _target_lbl:    list = []
+    _target_panels: list = []
+
     if config is not None:
         _v = _load_system_vars_yaml(config)
         R_NP                = _v["R_NP"]
@@ -865,88 +936,132 @@ def scan_npdosing_langmuir(
         cell_conc           = _v["cell_conc_spr"]
         nonspec_interaction = _v["nonspec_interaction"]
         V_SPR               = _v["V_SPR"]
+        n_sampling_points   = _v["n_pts_1D"]
+        sigma_R_min         = _v["sigma_R_min"]
+        sigma_R_max         = _v["sigma_R_max"]
+        if len(_v["polymer_models"]) == 1:
+            _poly_model     = _v["polymer_models"][0]
+        if _v["npdosing_factors"]:
+            factors         = list(_v["npdosing_factors"])
+        _target_sr          = list(_v["target_sigma_R"])
+        _target_lbl         = list(_v["target_sigma_R_labels"])
+        _target_panels      = list(_v["target_sigma_R_panels"])
     else:
         from system_variables_invitro import (
             R_NP, data_polymers, A_SPR, NP_conc, cell_conc,
             nonspec_interaction, V_SPR, receptor,
         )
-    n_sampling_points = _langmuir_n_pts
-    sigma_R_min       = _langmuir_sigma_min
-    sigma_R_max       = _langmuir_sigma_max
-    factors           = list(_langmuir_factors)
 
-    min_exp = np.log10(sigma_R_min)
-    max_exp = np.log10(sigma_R_max)
-    sigma_R_values = np.logspace(min_exp, max_exp, n_sampling_points)
+    # CLI overrides (highest priority)
+    if n_pts         is not None: n_sampling_points = n_pts
+    if sigma_r_min   is not None: sigma_R_min       = sigma_r_min / um2
+    if sigma_r_max   is not None: sigma_R_max       = sigma_r_max / um2
+    if polymer_model is not None: _poly_model       = polymer_model
+    if npdosing_factor:           factors           = list(npdosing_factor)
+    if target_sigma_r:            _target_sr        = list(target_sigma_r)
+    if target_label:              _target_lbl       = list(target_label)
 
-    system_ref = MultivalentBinding(
-        kT=kT, R_NP=R_NP, data_polymers=data_polymers,
-        binding_model="exact", polymer_model="Flory-exact",
-        A_cell=A_SPR, NP_conc=NP_conc, cell_conc=cell_conc,
-        nonspec_interaction=nonspec_interaction,
-    )
+    cache_path  = os.path.join(str(output_dir), "run_results.npz")
+    factor_keys = [f"x{f:g}" for f in factors]
 
-    max_NR_ave = int((2 * R_NP)**2 * sigma_R_max)  # mean receptors in square NP footprint at sigma_R_max
-    # truncate Poisson sum at mean + 4 std; minimum of 20 for low-density regime
-    max_n_receptor = max_NR_ave + 4 * (max_NR_ave + 1) + 1 if max_NR_ave > 1 else 20
-    print(f"Computing K_bind for NR = 1..{max_n_receptor - 1} (slow step, done once)")
-    K_bind_vs_NR = system_ref.calculate_K_bind_vs_receptors(max_n_receptor)
-    print("K_bind computation done.")
-    results = {}
+    if replot and os.path.exists(cache_path):
+        factor_keys, results = _load_langmuir_results(cache_path)
+        print(f"[cache] loaded {cache_path} — re-plotting only.")
+    else:
+        sigma_R_values = np.logspace(np.log10(sigma_R_min), np.log10(sigma_R_max), n_sampling_points)
 
-    for factor in factors:
-        NP_conc_i = NP_conc * factor
-        label = f"Npdosing x{factor:g}"
-        print(f"\n--- {label} (NP_conc = {float(NP_conc_i):.3e} nm^-3) ---")
-
-        bound_vs_receptor = system_ref.calculate_bound_vs_receptors_monodisperse(
-            max_n_receptor, depletion=False, verbose=False,
-            K_bind_vs_NR=K_bind_vs_NR, NP_conc=NP_conc_i,
+        system_ref = MultivalentBinding(
+            kT=kT, R_NP=R_NP, data_polymers=data_polymers,
+            binding_model="exact", polymer_model=_poly_model,
+            A_cell=A_SPR, NP_conc=NP_conc, cell_conc=cell_conc,
+            nonspec_interaction=nonspec_interaction,
         )
 
-        sigma_out           = np.zeros(n_sampling_points)
-        frac_out            = np.zeros(n_sampling_points)
-        frac_out_max        = np.zeros(n_sampling_points)
-        nads_out            = np.zeros(n_sampling_points)
-        nads_lennart_fraction = np.zeros(n_sampling_points)
+        max_NR_ave = int((2 * R_NP)**2 * sigma_R_max)
+        max_n_receptor = max_NR_ave + 4 * (max_NR_ave + 1) + 1 if max_NR_ave > 1 else 20
+        print(f"Computing K_bind for NR = 1..{max_n_receptor - 1} (slow step, done once)")
+        K_bind_vs_NR = system_ref.calculate_K_bind_vs_receptors(max_n_receptor)
+        print("K_bind computation done.")
+        results = {}
 
-        for i, sigma_R in enumerate(sigma_R_values):
-            receptor["sigma_R"] = sigma_R
-            bound_fraction = system_ref.calculate_bound_fraction(
-                fluctuations=True, depletion=False,
-                bound_vs_receptor=bound_vs_receptor,
-                max_factor=4,
+        for factor in factors:
+            fkey      = f"x{factor:g}"
+            NP_conc_i = NP_conc * factor
+            print(f"\n--- Npdosing {fkey} (NP_conc = {float(NP_conc_i):.3e} nm^-3) ---")
+
+            bound_vs_receptor = system_ref.calculate_bound_vs_receptors_monodisperse(
+                max_n_receptor, depletion=False, verbose=False,
+                K_bind_vs_NR=K_bind_vs_NR, NP_conc=NP_conc_i,
             )
-            max_num_sites = A_SPR / system_ref.NP_excluded_area
-            sigma_out[i]    = float(sigma_R / (1 / um2))
-            frac_out[i]     = float(bound_fraction)
-            frac_out_max[i] = 1 - np.exp(-sigma_R * system_ref.NP_excluded_area)  # Poisson limit: P(≥1 receptor in footprint)
-            nads_out[i]     = float(bound_fraction) * max_num_sites
 
-        mass_SPR = V_SPR * NP_conc_i
-        mass_A_SPR = nads_out
-        nads_lennart_fraction = mass_A_SPR / (mass_SPR + mass_A_SPR)  # adsorbed / (solution + adsorbed), SPR normalisation
+            sigma_out             = np.zeros(n_sampling_points)
+            frac_out              = np.zeros(n_sampling_points)
+            frac_out_max          = np.zeros(n_sampling_points)
+            nads_out              = np.zeros(n_sampling_points)
+            nads_lennart_fraction = np.zeros(n_sampling_points)
 
-        results[factor] = (sigma_out, frac_out, nads_out, nads_lennart_fraction)
-        fname = f"adsorption_Npdosing_x{factor:g}.dat"
-        with open(os.path.join(output_dir, fname), "w") as f:
-            for j in range(n_sampling_points):
-                f.write(
-                    f"{sigma_out[j]:5.3e} {frac_out[j]:5.3e} "
-                    f"{nads_out[j]:5.3e} {nads_lennart_fraction[j]:5.3e} \n"
+            for i, sigma_R in enumerate(sigma_R_values):
+                receptor["sigma_R"] = sigma_R
+                bound_fraction = system_ref.calculate_bound_fraction(
+                    fluctuations=True, depletion=False,
+                    bound_vs_receptor=bound_vs_receptor,
+                    max_factor=4,
                 )
+                max_num_sites   = A_SPR / system_ref.NP_excluded_area
+                sigma_out[i]    = float(sigma_R / (1 / um2))
+                frac_out[i]     = float(bound_fraction)
+                frac_out_max[i] = 1 - np.exp(-sigma_R * system_ref.NP_excluded_area)
+                nads_out[i]     = float(bound_fraction) * max_num_sites
+
+            mass_SPR              = V_SPR * NP_conc_i
+            nads_lennart_fraction = nads_out / (mass_SPR + nads_out)
+
+            results[fkey] = {
+                "sigma_R_um2":       sigma_out,
+                "bound_fraction":    frac_out,
+                "poisson_limit":     frac_out_max,
+                "n_ads":             nads_out,
+                "langmuir_fraction": nads_lennart_fraction,
+            }
+
+        _save_langmuir_results(cache_path, factor_keys, results)
+
+    # Write .dat files (both normal run and replot)
+    for fkey, res in results.items():
+        _sr   = res["sigma_R_um2"]
+        _bf   = res["bound_fraction"]
+        _nads = res["n_ads"]
+        _lf   = res["langmuir_fraction"]
+        fname = f"adsorption_Npdosing_{fkey}.dat"
+        with open(os.path.join(output_dir, fname), "w") as f:
+            for j in range(len(_sr)):
+                f.write(f"{_sr[j]:5.3e} {_bf[j]:5.3e} {_nads[j]:5.3e} {_lf[j]:5.3e} \n")
         print(f"  Written to {os.path.join(output_dir, fname)}")
 
+    # Plotting
+    def _on_panel(k, panel_id):
+        tag = (_target_panels[k] if k < len(_target_panels) else "all")
+        return tag == "all" or str(panel_id) in tag.split(",")
+
+    first_res = next(iter(results.values()))
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-    for factor in factors:
-        sigma_out, frac_out, nads_out, nads_lennart_fraction = results[factor]
-        ax1.plot(sigma_out, frac_out,              linestyle="solid", label=f"Npdosing x{factor:g}")
-        ax2.plot(sigma_out, nads_out,              linestyle="solid", label=f"Npdosing x{factor:g}")
-        ax3.plot(sigma_out, nads_lennart_fraction, linestyle="solid", label=f"Npdosing x{factor:g}")
-    ax1.plot(sigma_out, frac_out_max, linestyle="--", label="Poisson")
+    for fkey, res in results.items():
+        ax1.plot(res["sigma_R_um2"], res["bound_fraction"],    linestyle="solid", label=fkey)
+        ax2.plot(res["sigma_R_um2"], res["n_ads"],             linestyle="solid", label=fkey)
+        ax3.plot(res["sigma_R_um2"], res["langmuir_fraction"], linestyle="solid", label=fkey)
+    ax1.plot(first_res["sigma_R_um2"], first_res["poisson_limit"],
+             linestyle="--", color="black", label="Poisson limit")
+
+    axes_list = [ax1, ax2, ax3]
+    for k, v in enumerate(_target_sr):
+        lbl = _target_lbl[k] if k < len(_target_lbl) else f"{v:.0f} µm⁻²"
+        for panel_id, ax in enumerate(axes_list, start=1):
+            if _on_panel(k, panel_id):
+                ax.axvline(x=v, color="gray", linestyle="dashed", linewidth=0.9, label=lbl)
+
     ax1.set_xscale("log")
     ax1.set_xlabel(r"Receptor surface density ($\mu$m$^{-2}$)")
-    ax1.set_ylabel("Adsorbed fraction")
+    ax1.set_ylabel("Fraction of adsorbed NPs")
     ax1.legend()
     ax2.set_xscale("log"); ax2.set_yscale("log")
     ax2.set_xlabel(r"Receptor surface density ($\mu$m$^{-2}$)")
