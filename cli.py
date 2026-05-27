@@ -646,7 +646,7 @@ def _execute_run(run_spec: dict):
           f"|  axes: {primary_receptor_names} ===", flush=True)
 
     cache_path = os.path.join(run_output_dir, "run_results.npz")
-    if run_spec.get("skip_existing", False) and os.path.exists(cache_path):
+    if run_spec.get("replot", False) and os.path.exists(cache_path):
         results, primary_receptor_names = _load_results(cache_path)
         _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
         print(f"  [cache] {run_name}", flush=True)
@@ -1077,8 +1077,8 @@ def scan_both_polymer_models_cmd(
         "--target-label",
         help="Label for reference marker (same order as --target-sigma-r), repeatable.",
     )] = None,
-    skip_existing: Annotated[bool, typer.Option(
-        "--skip-existing",
+    replot: Annotated[bool, typer.Option(
+        "--replot",
         help="If run_results.npz already exists, load it and re-plot without recomputing.",
     )] = False,
 ):
@@ -1176,7 +1176,7 @@ def scan_both_polymer_models_cmd(
     models_to_run = list(_sbpm.polymer_models)
     cache_path    = os.path.join(str(output_dir), "run_results.npz")
 
-    if skip_existing and os.path.exists(cache_path):
+    if replot and os.path.exists(cache_path):
         results, primary_names = _load_results(cache_path)
         print(f"[cache] loaded {cache_path} — re-plotting only.")
     else:
@@ -1268,8 +1268,8 @@ def scan_combinations_cmd(
              'Allows splitting a batch across HPC nodes. '
              'Example: --job-range 1:4 runs the first 4 non-skipped runs.',
     )] = None,
-    skip_existing: Annotated[bool, typer.Option(
-        "--skip-existing",
+    replot: Annotated[bool, typer.Option(
+        "--replot",
         help="If run_results.npz already exists for a run, load it and re-plot "
              "without recomputing. Default: always recompute.",
     )] = False,
@@ -1440,7 +1440,7 @@ def scan_combinations_cmd(
             "run_output_dir":    str(os.path.join(str(output_dir), run_name)),
             "models_to_run":     models_to_run,
             "n_cores_per_run":   n_cores_per_run,
-            "skip_existing":     skip_existing,
+            "replot":     replot,
             **physics_snapshot,
         })
 

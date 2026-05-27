@@ -2028,7 +2028,7 @@ class TestCacheRoundtrip(unittest.TestCase):
 
 
 class TestScanCombinations_SkipExisting(unittest.TestCase):
-    """--skip-existing loads run_results.npz and re-plots without recomputing."""
+    """--replot loads run_results.npz and re-plots without recomputing."""
 
     @classmethod
     def setUpClass(cls):
@@ -2055,7 +2055,7 @@ class TestScanCombinations_SkipExisting(unittest.TestCase):
     def test_cache_file_written(self):
         self.assertTrue((self.out / "A" / "run_results.npz").exists())
 
-    def test_skip_existing_reproduces_dat(self):
+    def test_replot_reproduces_dat(self):
         saved2 = _save_sbpm_state()
         dat_path = self.out / "A" / "adsorption_gaussian.dat"
         original = dat_path.read_text()
@@ -2068,7 +2068,7 @@ class TestScanCombinations_SkipExisting(unittest.TestCase):
                 polymer_model=["gaussian"],
                 n_workers=1,
                 n_cores_per_run=1,
-                skip_existing=True,
+                replot=True,
             )
         finally:
             _restore_sbpm_state(saved2)
@@ -2077,7 +2077,7 @@ class TestScanCombinations_SkipExisting(unittest.TestCase):
 
 
 class TestScanBothModels_SkipExisting(unittest.TestCase):
-    """--skip-existing on scan_both_polymer_models_cmd loads cache and re-plots."""
+    """--replot on scan_both_polymer_models_cmd loads cache and re-plots."""
 
     @classmethod
     def setUpClass(cls):
@@ -2100,7 +2100,7 @@ class TestScanBothModels_SkipExisting(unittest.TestCase):
     def test_cache_file_written(self):
         self.assertTrue((self.out / "run_results.npz").exists())
 
-    def test_skip_existing_reproduces_dat(self):
+    def test_replot_reproduces_dat(self):
         saved2 = _save_sbpm_state()
         dat_path = self.out / "adsorption_gaussian.dat"
         original = dat_path.read_text()
@@ -2110,7 +2110,7 @@ class TestScanBothModels_SkipExisting(unittest.TestCase):
                 output_dir=self.out,
                 n_pts_1d=3,
                 polymer_model=["gaussian"],
-                skip_existing=True,
+                replot=True,
             )
         finally:
             _restore_sbpm_state(saved2)
