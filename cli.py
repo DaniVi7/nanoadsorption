@@ -485,6 +485,38 @@ def _build_data_polymers_for_run(
     return data_polymers, receptor_registry
 
 
+def _save_results(path: str, results: dict, primary_names: list) -> None:
+    """Persist a sweep results dict to a compressed .npz archive."""
+    arrays: dict = {
+        "_primary_names": np.array(primary_names),
+        "_model_names":   np.array(sorted(results.keys())),
+    }
+    for model, res in results.items():
+        for key, val in res.items():
+            arrays[f"{model}__{key}"] = np.array(val)
+    np.savez_compressed(path, **arrays)
+
+
+def _load_results(path: str) -> tuple:
+    """Load a sweep results dict from a .npz archive.
+    Returns (results, primary_names)."""
+    data          = np.load(path, allow_pickle=False)
+    primary_names = data["_primary_names"].tolist()
+    model_names   = data["_model_names"].tolist()
+    results: dict = {}
+    for model in model_names:
+        prefix = f"{model}__"
+        res: dict = {}
+        for key in data.files:
+            if not key.startswith(prefix):
+                continue
+            subkey = key[len(prefix):]
+            val    = data[key]
+            res[subkey] = val.tolist() if subkey == "rec_names" else val
+        results[model] = res
+    return results, primary_names
+
+
 def _write_and_plot_sweep(results: dict, output_dir, primary_names: list):
     """Write .dat files and PNG plots for a completed receptor-density sweep.
 
@@ -613,6 +645,13 @@ def _execute_run(run_spec: dict):
     print(f"=== {run_name}  |  receptors: {list(receptor_map)}  "
           f"|  axes: {primary_receptor_names} ===", flush=True)
 
+    cache_path = os.path.join(run_output_dir, "run_results.npz")
+    if run_spec.get("skip_existing", False) and os.path.exists(cache_path):
+        results, primary_receptor_names = _load_results(cache_path)
+        _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+        print(f"  [cache] {run_name}", flush=True)
+        return run_name, None
+
     n_cores = run_spec.get("n_cores_per_run", 1)
     results = {}
     for model_name in run_spec["models_to_run"]:
@@ -625,6 +664,7 @@ def _execute_run(run_spec: dict):
                 n_workers=n_cores)
 
     _write_and_plot_sweep(results, run_output_dir, primary_receptor_names)
+    _save_results(cache_path, results, primary_receptor_names)
     return run_name, None
 
 
@@ -1037,6 +1077,10 @@ def scan_both_polymer_models_cmd(
         "--target-label",
         help="Label for reference marker (same order as --target-sigma-r), repeatable.",
     )] = None,
+    skip_existing: Annotated[bool, typer.Option(
+        "--skip-existing",
+        help="If run_results.npz already exists, load it and re-plot without recomputing.",
+    )] = False,
 ):
     """Receptor density sweep comparing gaussian and Flory-exact polymer tether models.
 
@@ -1130,16 +1174,22 @@ def scan_both_polymer_models_cmd(
     print(f"Independent axes ({n_independent}): {primary_names}")
 
     models_to_run = list(_sbpm.polymer_models)
+    cache_path    = os.path.join(str(output_dir), "run_results.npz")
 
-    results = {}
-    for model_name in models_to_run:
-        print(f"\n=== Running model: {model_name} ===")
-        if n_independent == 1:
-            results[model_name] = _sbpm.sweep_1axis(model_name, primary_names[0])
-        else:
-            results[model_name] = _sbpm.sweep_2axes(
-                model_name, primary_names[0], primary_names[1]
-            )
+    if skip_existing and os.path.exists(cache_path):
+        results, primary_names = _load_results(cache_path)
+        print(f"[cache] loaded {cache_path} — re-plotting only.")
+    else:
+        results = {}
+        for model_name in models_to_run:
+            print(f"\n=== Running model: {model_name} ===")
+            if n_independent == 1:
+                results[model_name] = _sbpm.sweep_1axis(model_name, primary_names[0])
+            else:
+                results[model_name] = _sbpm.sweep_2axes(
+                    model_name, primary_names[0], primary_names[1]
+                )
+        _save_results(cache_path, results, primary_names)
 
     print("\nAll sweeps done.")
     _write_and_plot_sweep(results, output_dir, primary_names)
@@ -1218,6 +1268,11 @@ def scan_combinations_cmd(
              'Allows splitting a batch across HPC nodes. '
              'Example: --job-range 1:4 runs the first 4 non-skipped runs.',
     )] = None,
+    skip_existing: Annotated[bool, typer.Option(
+        "--skip-existing",
+        help="If run_results.npz already exists for a run, load it and re-plot "
+             "without recomputing. Default: always recompute.",
+    )] = False,
 ):
     """Receptor density sweeps for every single binder and pair of binders in a CSV.
 
@@ -1385,6 +1440,7 @@ def scan_combinations_cmd(
             "run_output_dir":    str(os.path.join(str(output_dir), run_name)),
             "models_to_run":     models_to_run,
             "n_cores_per_run":   n_cores_per_run,
+            "skip_existing":     skip_existing,
             **physics_snapshot,
         })
 

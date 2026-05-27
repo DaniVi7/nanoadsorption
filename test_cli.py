@@ -1973,5 +1973,150 @@ class TestScanCombinations_JobRange(unittest.TestCase):
         self.assertFalse((self.out / "lig2+lig3").exists())
 
 
+class TestCacheRoundtrip(unittest.TestCase):
+    """Unit tests for _save_results / _load_results: no physics involved."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_save_load_1d(self):
+        results = {
+            "gaussian":    {"sigma_R_um2": np.array([1.0, 2.0]),
+                            "bound_fraction": np.array([0.1, 0.2]),
+                            "n_ads": np.array([1e-5, 2e-5])},
+            "Flory-exact": {"sigma_R_um2": np.array([1.0, 2.0]),
+                            "bound_fraction": np.array([0.15, 0.25]),
+                            "n_ads": np.array([1.5e-5, 2.5e-5])},
+        }
+        primary_names = ["R1"]
+        path = str(self.tmp / "test_1d.npz")
+        cli._save_results(path, results, primary_names)
+        loaded, loaded_pnames = cli._load_results(path)
+
+        self.assertEqual(loaded_pnames, primary_names)
+        self.assertEqual(sorted(loaded.keys()), sorted(results.keys()))
+        for model in results:
+            for key in results[model]:
+                np.testing.assert_array_equal(loaded[model][key], results[model][key])
+
+    def test_save_load_2d(self):
+        results = {
+            "gaussian": {
+                "sigma_R1_um2": np.array([1.0, 2.0]),
+                "sigma_R2_um2": np.array([10.0, 20.0]),
+                "bound_fraction": np.array([[0.1, 0.2], [0.3, 0.4]]),
+                "n_ads": np.array([[1e-5, 2e-5], [3e-5, 4e-5]]),
+                "rec_names": ["R1", "R2"],
+            }
+        }
+        primary_names = ["R1", "R2"]
+        path = str(self.tmp / "test_2d.npz")
+        cli._save_results(path, results, primary_names)
+        loaded, loaded_pnames = cli._load_results(path)
+
+        self.assertEqual(loaded_pnames, primary_names)
+        res = loaded["gaussian"]
+        self.assertIsInstance(res["rec_names"], list)
+        self.assertEqual(res["rec_names"], ["R1", "R2"])
+        np.testing.assert_array_equal(res["bound_fraction"],
+                                      results["gaussian"]["bound_fraction"])
+
+
+class TestScanCombinations_SkipExisting(unittest.TestCase):
+    """--skip-existing loads run_results.npz and re-plots without recomputing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        mp.dps = 50
+        cls.tmp = Path(tempfile.mkdtemp())
+        csv_content = "Target,A\nR1,150.0\n"
+        cls.csv = _write_temp_csv(cls.tmp, csv_content)
+        cls.out = cls.tmp / "out"
+        cli.scan_combinations_cmd(
+            csv_path=cls.csv,
+            output_dir=cls.out,
+            n_pts_1d=3,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_cache_file_written(self):
+        self.assertTrue((self.out / "A" / "run_results.npz").exists())
+
+    def test_skip_existing_reproduces_dat(self):
+        saved2 = _save_sbpm_state()
+        dat_path = self.out / "A" / "adsorption_gaussian.dat"
+        original = dat_path.read_text()
+        dat_path.unlink()
+        try:
+            cli.scan_combinations_cmd(
+                csv_path=self.csv,
+                output_dir=self.out,
+                n_pts_1d=3,
+                polymer_model=["gaussian"],
+                n_workers=1,
+                n_cores_per_run=1,
+                skip_existing=True,
+            )
+        finally:
+            _restore_sbpm_state(saved2)
+        self.assertTrue(dat_path.exists())
+        self.assertEqual(dat_path.read_text(), original)
+
+
+class TestScanBothModels_SkipExisting(unittest.TestCase):
+    """--skip-existing on scan_both_polymer_models_cmd loads cache and re-plots."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = _save_sbpm_state()
+        mp.dps = 50
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.out = Path(cls.tmp) / "out"
+        cls.out.mkdir()
+        cli.scan_both_polymer_models_cmd(
+            output_dir=cls.out,
+            n_pts_1d=3,
+            polymer_model=["gaussian"],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_cache_file_written(self):
+        self.assertTrue((self.out / "run_results.npz").exists())
+
+    def test_skip_existing_reproduces_dat(self):
+        saved2 = _save_sbpm_state()
+        dat_path = self.out / "adsorption_gaussian.dat"
+        original = dat_path.read_text()
+        dat_path.unlink()
+        try:
+            cli.scan_both_polymer_models_cmd(
+                output_dir=self.out,
+                n_pts_1d=3,
+                polymer_model=["gaussian"],
+                skip_existing=True,
+            )
+        finally:
+            _restore_sbpm_state(saved2)
+        self.assertTrue(dat_path.exists())
+        self.assertEqual(dat_path.read_text(), original)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
