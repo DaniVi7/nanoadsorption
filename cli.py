@@ -552,6 +552,7 @@ def _load_system_vars_yaml(path: Path) -> dict:
         "V_SPR":                 V_SPR,
         "NP_conc_spr":           NP_conc_spr,
         "cell_conc_spr":         cell_conc_spr,
+        "invitro_mode":          ("A_SPR_mm2" in cfg or "V_SPR_mL" in cfg),
         "codependent_receptors": codep,
         "target_sigma_R":        sweep_target_sigma_R,
         "target_sigma_R_labels": sweep_target_sigma_R_labels,
@@ -738,7 +739,7 @@ def _load_langmuir_results(path: str) -> tuple:
 
 
 def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
-                          target_axes=None):
+                          target_axes=None, fname_suffix: str = ""):
     """Write .dat files and PNG plots for a completed receptor-density sweep.
 
     results      : {model_name: sweep_dict} returned by sweep_1axis or sweep_2axes
@@ -747,6 +748,8 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
     target_axes  : list of '1', '2', or 'both' per entry in _sbpm.target_sigma_R;
                    controls which receptor axis each reference line appears on in 2D plots.
                    Ignored for 1D plots (single axis). Defaults to 'both' for any missing entry.
+    fname_suffix : string appended to all output filenames before the extension
+                   (e.g. "_x0.001" → adsorption_gaussian_x0.001.dat). Empty string = no suffix.
     """
     n_independent = len(primary_names)
     n_models      = len(results)
@@ -760,7 +763,7 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
     for model_name, res in results.items():
         safe_name = model_name.replace("-", "_")
         if n_independent == 1:
-            fname = f"adsorption_{safe_name}.dat"
+            fname = f"adsorption_{safe_name}{fname_suffix}.dat"
             with open(os.path.join(output_dir, fname), "w") as f:
                 f.write("# sigma_R(um^-2)  bound_fraction  theta\n")
                 for j in range(len(res["sigma_R_um2"])):
@@ -770,7 +773,7 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
                         f"{float(res['bound_fraction'][j]) * _theta_scale:9.4e}\n"
                     )
         else:
-            fname = f"adsorption_2rec_{safe_name}.dat"
+            fname = f"adsorption_2rec_{safe_name}{fname_suffix}.dat"
             nr1 = len(res["sigma_R1_um2"])
             nr2 = len(res["sigma_R2_um2"])
             with open(os.path.join(output_dir, fname), "w") as f:
@@ -809,7 +812,7 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
         ax2.set_ylabel("Fraction of occupied surface")
         ax2.legend(fontsize="small")
         plt.tight_layout()
-        out_png = os.path.join(output_dir, "adsorption_polymer_models.png")
+        out_png = os.path.join(output_dir, f"adsorption_polymer_models{fname_suffix}.png")
         plt.savefig(out_png, dpi=150)
         plt.close()
         print(f"Saved {out_png}")
@@ -830,8 +833,8 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
 
         _sbpm._plot_case_b(
             "bound_fraction", "Fraction of adsorbed NPs",
-            os.path.join(output_dir, "adsorption_polymer_models_3D.png"),
-            os.path.join(output_dir, "adsorption_polymer_models_2D_proj.png"),
+            os.path.join(output_dir, f"adsorption_polymer_models_3D{fname_suffix}.png"),
+            os.path.join(output_dir, f"adsorption_polymer_models_2D_proj{fname_suffix}.png"),
             results, n_models,
             _sr1=sr1, _sr1_labels=sr1_lbl,
             _sr2=sr2, _sr2_labels=sr2_lbl,
@@ -843,12 +846,53 @@ def _write_and_plot_sweep(results: dict, output_dir, primary_names: list,
         }
         _sbpm._plot_case_b(
             "n_ads", "Fraction of occupied surface",
-            os.path.join(output_dir, "adsorption_polymer_models_3D_theta.png"),
-            os.path.join(output_dir, "adsorption_polymer_models_2D_proj_theta.png"),
+            os.path.join(output_dir, f"adsorption_polymer_models_3D_theta{fname_suffix}.png"),
+            os.path.join(output_dir, f"adsorption_polymer_models_2D_proj_theta{fname_suffix}.png"),
             results_theta, n_models,
             _sr1=sr1, _sr1_labels=sr1_lbl,
             _sr2=sr2, _sr2_labels=sr2_lbl,
         )
+
+
+def _run_invitro_multifactor(run_spec: dict, primary_names: list,
+                             run_output_dir: str, n_primary: int,
+                             run_target_axes: list) -> None:
+    """Run a σ_R sweep for every NP concentration factor in invitro (SPR) mode.
+
+    K_bind is computed once per polymer model and reused across all dosing factors;
+    only calculate_bound_vs_receptors_monodisperse (cheap) is re-run per factor.
+    Writes one set of PNGs per factor using _write_and_plot_sweep with fname_suffix.
+    """
+    NP_conc_ref = run_spec["NP_conc_spr"]
+    factors     = run_spec["npdosing_factors"] or list(_langmuir_factors)
+    n_cores     = run_spec.get("n_cores_per_run", 1)
+
+    K_bind_cache: dict = {}   # model_name → K_bind_data (computed once, reused)
+
+    for factor in factors:
+        NP_conc_i     = NP_conc_ref * factor
+        _sbpm.NP_conc = NP_conc_i   # drives _theta_scale in _write_and_plot_sweep
+
+        results: dict = {}
+        for model_name in run_spec["models_to_run"]:
+            if n_primary == 1:
+                res = _sbpm.sweep_1axis(
+                    model_name, primary_names[0],
+                    n_workers=n_cores,
+                    K_bind_data=K_bind_cache.get(model_name),
+                )
+            else:
+                res = _sbpm.sweep_2axes(
+                    model_name, primary_names[0], primary_names[1],
+                    n_workers=n_cores,
+                    K_bind_data=K_bind_cache.get(model_name),
+                )
+            K_bind_cache[model_name] = res.pop("K_bind_data")
+            results[model_name] = res
+
+        suffix = f"_x{factor:g}"
+        _write_and_plot_sweep(results, run_output_dir, primary_names,
+                              target_axes=run_target_axes, fname_suffix=suffix)
 
 
 def _execute_run(run_spec: dict):
@@ -859,9 +903,15 @@ def _execute_run(run_spec: dict):
     Returns (run_name, None) on success or (None, skip_message) when > 2 axes.
     """
     _sbpm.R_NP                  = run_spec["R_NP"]
-    _sbpm.A_cell                = run_spec["A_cell"]
-    _sbpm.NP_conc               = run_spec["NP_conc"]
-    _sbpm.cell_conc             = run_spec["cell_conc"]
+    # Invitro mode: use SPR geometry instead of biological cell geometry.
+    if run_spec.get("invitro_mode"):
+        _sbpm.A_cell            = run_spec["A_SPR"]
+        _sbpm.NP_conc           = run_spec["NP_conc_spr"]
+        _sbpm.cell_conc         = run_spec["cell_conc_spr"]
+    else:
+        _sbpm.A_cell            = run_spec["A_cell"]
+        _sbpm.NP_conc           = run_spec["NP_conc"]
+        _sbpm.cell_conc         = run_spec["cell_conc"]
     _sbpm.nonspec_interaction   = run_spec["nonspec_interaction"]
     _sbpm.n_pts_1D              = run_spec["n_pts_1D"]
     _sbpm.n_pts_2D              = run_spec["n_pts_2D"]
@@ -899,6 +949,13 @@ def _execute_run(run_spec: dict):
     os.makedirs(run_output_dir, exist_ok=True)
     print(f"=== {run_name}  |  receptors: {list(receptor_map)}  "
           f"|  axes: {primary_receptor_names} ===", flush=True)
+
+    # Invitro multi-factor path: sweep σ_R for each NP concentration factor.
+    # K_bind is computed once per model and reused — see _run_invitro_multifactor.
+    if run_spec.get("invitro_mode"):
+        _run_invitro_multifactor(run_spec, primary_receptor_names,
+                                 run_output_dir, n_primary_axes, _run_target_axes)
+        return run_name, None
 
     cache_path = os.path.join(run_output_dir, "run_results.npz")
     if run_spec.get("replot", False) and os.path.exists(cache_path):
@@ -1646,9 +1703,15 @@ def scan_combinations_cmd(
         # _make_system reads R_NP, A_cell, NP_conc, cell_conc, nonspec_interaction by name
         # from _sbpm's module scope — they must match the YAML values used to compute sigma_L.
         _sbpm.R_NP                   = config_vars["R_NP"]
-        _sbpm.A_cell                 = config_vars["A_cell"]
-        _sbpm.NP_conc                = config_vars["NP_conc"]
-        _sbpm.cell_conc              = config_vars["cell_conc"]
+        # For invitro mode use SPR geometry; invivo uses biological cell geometry.
+        if config_vars.get("invitro_mode"):
+            _sbpm.A_cell             = config_vars["A_SPR"]
+            _sbpm.NP_conc            = config_vars["NP_conc_spr"]
+            _sbpm.cell_conc          = config_vars["cell_conc_spr"]
+        else:
+            _sbpm.A_cell             = config_vars["A_cell"]
+            _sbpm.NP_conc            = config_vars["NP_conc"]
+            _sbpm.cell_conc          = config_vars["cell_conc"]
         _sbpm.nonspec_interaction    = config_vars["nonspec_interaction"]
         _sbpm.n_pts_1D               = config_vars["n_pts_1D"]
         _sbpm.n_pts_2D               = config_vars["n_pts_2D"]
@@ -1746,6 +1809,7 @@ def scan_combinations_cmd(
     models_to_run = list(_sbpm.polymer_models)
 
     # Snapshot physics globals once; each worker receives them by value.
+    _cv = config_vars if config is not None else {}
     physics_snapshot = {
         "R_NP":                  _sbpm.R_NP,
         "A_cell":                _sbpm.A_cell,
@@ -1759,6 +1823,13 @@ def scan_combinations_cmd(
         "target_sigma_R":        list(_sbpm.target_sigma_R),
         "target_sigma_R_labels": list(_sbpm.target_sigma_R_labels),
         "target_sigma_R_axes":   list(_target_axes),
+        # invitro multi-factor mode — populated when an SPR YAML is supplied
+        "invitro_mode":          _cv.get("invitro_mode",    False),
+        "A_SPR":                 _cv.get("A_SPR",           1.0 * mm2),
+        "V_SPR":                 _cv.get("V_SPR",           6.0e-5 * mL),
+        "NP_conc_spr":           _cv.get("NP_conc_spr",     4.0e11 / mL),
+        "cell_conc_spr":         _cv.get("cell_conc_spr",   1.0 / (6.0e-5 * mL)),
+        "npdosing_factors":      list(_cv.get("npdosing_factors", []) or []),
     }
 
     # Pre-filter: skip runs with > 2 primary axes before dispatching.

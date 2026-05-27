@@ -280,13 +280,15 @@ def _parallel_calculate_k_bind(max_N_receptor, rec_refs, polymer_model_name, n_w
 
 
 # ── Case A: 1-axis sweep ──────────────────────────────────────────────────────
-def sweep_1axis(polymer_model_name, primary_name, n_workers=1):
+def sweep_1axis(polymer_model_name, primary_name, n_workers=1, K_bind_data=None):
     """Sweep sigma_R along one independent receptor axis.
 
     Codependent receptors are updated at every point via _resolve_sigma_R.
-    Returns {"sigma_R_um2", "bound_fraction", "n_ads", "primary_name"}.
+    Returns {"sigma_R_um2", "bound_fraction", "n_ads", "primary_name", "K_bind_data"}.
     Uses module-level sigma_R_min, sigma_R_max, n_pts_1D.
     n_workers > 1 parallelizes the K_bind precomputation across worker processes.
+    K_bind_data: if provided, skip the expensive K_bind precomputation and reuse the
+    supplied table. Always returned in the result dict for caller caching.
     """
     system, rec_refs = _make_system(polymer_model_name)
     sigma_R_arr = np.logspace(np.log10(sigma_R_min), np.log10(sigma_R_max), n_pts_1D)
@@ -297,12 +299,13 @@ def sweep_1axis(polymer_model_name, primary_name, n_workers=1):
     max_NR_ave     = int(system.NP_excluded_area * sigma_R_max)
     max_N_receptor = max_NR_ave + 4 * (max_NR_ave + 1) + 1
 
-    print(f"  [{polymer_model_name}] Precomputing K_bind table (max NR = {max_N_receptor})...")
-    if n_workers > 1:
-        K_bind_data = _parallel_calculate_k_bind(
-            max_N_receptor, rec_refs, polymer_model_name, n_workers)
-    else:
-        K_bind_data = system.calculate_K_bind_vs_receptors(max_N_receptor)
+    if K_bind_data is None:
+        print(f"  [{polymer_model_name}] Precomputing K_bind table (max NR = {max_N_receptor})...")
+        if n_workers > 1:
+            K_bind_data = _parallel_calculate_k_bind(
+                max_N_receptor, rec_refs, polymer_model_name, n_workers)
+        else:
+            K_bind_data = system.calculate_K_bind_vs_receptors(max_N_receptor)
     is_multi    = isinstance(K_bind_data, tuple)
     if is_multi:
         K_bind_flat, grid_shape, _, rec_names_ordered = K_bind_data
@@ -334,19 +337,24 @@ def sweep_1axis(polymer_model_name, primary_name, n_workers=1):
         "bound_fraction": bf_arr,
         "n_ads":          nads_arr,
         "primary_name":   primary_name,
+        "K_bind_data":    K_bind_data,
     }
 
 
 # ── Case B: 2-axis grid sweep ─────────────────────────────────────────────────
-def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1):
+def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1,
+                K_bind_data=None):
     """Sweep (sigma_R1, sigma_R2) on a 2D grid for two independent receptor axes.
 
     Codependent receptors are updated at every grid point via _resolve_sigma_R.
     K_bind_flat is precomputed once at sigma_R_max (depends only on integer
     receptor counts). Only NR_aves are updated per grid point.
-    Returns {"sigma_R1_um2", "sigma_R2_um2", "bound_fraction", "n_ads", "rec_names"}.
+    Returns {"sigma_R1_um2", "sigma_R2_um2", "bound_fraction", "n_ads", "rec_names",
+    "K_bind_data"}.
     bound_fraction[i, j] = f(sigma_R1[i], sigma_R2[j]).
     n_workers > 1 parallelizes the K_bind precomputation across worker processes.
+    K_bind_data: if provided as (K_bind_flat, grid_shape, _, rec_names_ordered), skip
+    the expensive precomputation. Always returned in the result dict for caller caching.
     """
     system, rec_refs = _make_system(polymer_model_name)
     sigma_R_arr = np.logspace(np.log10(sigma_R_min), np.log10(sigma_R_max), n_pts_2D)
@@ -355,14 +363,15 @@ def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1)
     max_NR_ave     = int(system.NP_excluded_area * sigma_R_max)
     max_N_receptor = max_NR_ave + 4 * (max_NR_ave + 1) + 1
 
-    print(f"  [{polymer_model_name}] Precomputing 2D K_bind grid "
-          f"(max NR = {max_N_receptor} per axis, {max_N_receptor**2} grid points)...")
-    if n_workers > 1:
-        K_bind_flat, grid_shape, _, rec_names_ordered = _parallel_calculate_k_bind(
-            max_N_receptor, rec_refs, polymer_model_name, n_workers)
-    else:
-        K_bind_flat, grid_shape, _, rec_names_ordered = \
-            system.calculate_K_bind_vs_receptors(max_N_receptor)
+    if K_bind_data is None:
+        print(f"  [{polymer_model_name}] Precomputing 2D K_bind grid "
+              f"(max NR = {max_N_receptor} per axis, {max_N_receptor**2} grid points)...")
+        if n_workers > 1:
+            K_bind_data = _parallel_calculate_k_bind(
+                max_N_receptor, rec_refs, polymer_model_name, n_workers)
+        else:
+            K_bind_data = system.calculate_K_bind_vs_receptors(max_N_receptor)
+    K_bind_flat, grid_shape, _, rec_names_ordered = K_bind_data
 
     M_conc = (A_cell / system.NP_excluded_area) * cell_conc
 
@@ -392,6 +401,7 @@ def sweep_2axes(polymer_model_name, primary_name_1, primary_name_2, n_workers=1)
         "bound_fraction": bf_grid,
         "n_ads":          nads_grid,
         "rec_names":      [primary_name_1, primary_name_2],
+        "K_bind_data":    K_bind_data,
     }
 
 

@@ -2431,6 +2431,103 @@ class TestDosingCombinations(unittest.TestCase):
             )
 
 
+class TestScanCombinations_InvitroMultiFactor(unittest.TestCase):
+    """Fast tests for scan-combinations invitro mode (1D, 2 dosing factors)."""
+
+    @classmethod
+    def setUpClass(cls):
+        mp.dps = 50
+        cls.saved = _save_sbpm_state()
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.out = cls.tmp / "out"
+        # Invitro YAML with 2 npdosing_factors; single receptor
+        yaml_path = _make_invitro_yaml(
+            cls.tmp, extra="npdosing_factors: [0.1, 1.0]\nn_pts_1D: 3\n"
+        )
+        csv_content = "Target,B001\ndefault,100.0\n"
+        csv_path = _write_temp_csv(cls.tmp, csv_content)
+        cli.scan_combinations_cmd(
+            csv_path=csv_path,
+            output_dir=cls.out,
+            config=yaml_path,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_per_factor_png_written(self):
+        for f in [0.1, 1.0]:
+            p = self.out / "B001" / f"adsorption_polymer_models_x{f:g}.png"
+            self.assertTrue(p.exists(), f"Missing PNG: {p.name}")
+
+    def test_per_factor_dat_written(self):
+        for f in [0.1, 1.0]:
+            p = self.out / "B001" / f"adsorption_gaussian_x{f:g}.dat"
+            self.assertTrue(p.exists(), f"Missing dat: {p.name}")
+
+    def test_no_suffix_free_png(self):
+        # invitro multi-factor path must not write the default no-suffix PNG
+        p = self.out / "B001" / "adsorption_polymer_models.png"
+        self.assertFalse(p.exists(), "Default no-suffix PNG should not be written in invitro mode")
+
+    def test_dat_columns(self):
+        import numpy as np
+        p = self.out / "B001" / "adsorption_gaussian_x1.dat"
+        data = np.loadtxt(p, comments="#")
+        self.assertEqual(data.ndim, 2)
+        self.assertEqual(data.shape[1], 3)  # sigma_R, bound_fraction, theta
+
+
+class TestScanCombinations_InvitroMultiFactor2D(unittest.TestCase):
+    """Fast tests for scan-combinations invitro mode (2D, 2 dosing factors)."""
+
+    @classmethod
+    def setUpClass(cls):
+        mp.dps = 50
+        cls.saved = _save_sbpm_state()
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.out = cls.tmp / "out"
+        yaml_path = _make_invitro_yaml(
+            cls.tmp, extra="npdosing_factors: [0.1, 1.0]\nn_pts_2D: 3\nn_pts_1D: 3\n"
+        )
+        # Two binders binding to two different receptors → 2D pair run
+        csv_content = "Target,B001,B002\nR1,100.0,\nR2,,200.0\n"
+        csv_path = _write_temp_csv(cls.tmp, csv_content)
+        cli.scan_combinations_cmd(
+            csv_path=csv_path,
+            output_dir=cls.out,
+            config=yaml_path,
+            polymer_model=["gaussian"],
+            n_workers=1,
+            n_cores_per_run=1,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_sbpm_state(cls.saved)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_3d_pngs_written(self):
+        for f in [0.1, 1.0]:
+            p = self.out / "B001+B002" / f"adsorption_polymer_models_3D_x{f:g}.png"
+            self.assertTrue(p.exists(), f"Missing 3D PNG: {p.name}")
+
+    def test_2d_proj_pngs_written(self):
+        for f in [0.1, 1.0]:
+            p = self.out / "B001+B002" / f"adsorption_polymer_models_2D_proj_x{f:g}.png"
+            self.assertTrue(p.exists(), f"Missing 2D proj PNG: {p.name}")
+
+    def test_2d_dat_written(self):
+        for f in [0.1, 1.0]:
+            p = self.out / "B001+B002" / f"adsorption_2rec_gaussian_x{f:g}.dat"
+            self.assertTrue(p.exists(), f"Missing 2D dat: {p.name}")
+
+
 class TestGenerateTemplate(unittest.TestCase):
     """Tests for generate-template --context flag."""
 
