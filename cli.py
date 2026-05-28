@@ -975,6 +975,8 @@ def _execute_run(run_spec: dict):
             results[model_name] = _sbpm.sweep_2axes(
                 model_name, primary_receptor_names[0], primary_receptor_names[1],
                 n_workers=n_cores)
+    for _r in results.values():
+        _r.pop("K_bind_data", None)
 
     _write_and_plot_sweep(results, run_output_dir, primary_receptor_names,
                           target_axes=_run_target_axes)
@@ -1593,6 +1595,8 @@ def scan_both_polymer_models_cmd(
                 results[model_name] = _sbpm.sweep_2axes(
                     model_name, primary_names[0], primary_names[1]
                 )
+        for _r in results.values():
+            _r.pop("K_bind_data", None)
         _save_results(cache_path, results, primary_names)
 
     print("\nAll sweeps done.")
